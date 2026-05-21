@@ -1,0 +1,8 @@
+{
+  "id": "obsidian-auto-tagger",
+  "name": "Auto Tag & Link Notes to Folder Structure",
+  "version": "2.2.0",
+  "minAppVersion": "1.0.0",
+  "description": "Automatically tags notes and creates structural links (siblings, parents, children) based on folder hierarchy.",
+  "isDesktopOnly": false
+}
