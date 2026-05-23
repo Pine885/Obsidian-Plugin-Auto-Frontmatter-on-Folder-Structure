@@ -4,5 +4,7 @@
   "version": "3.7.0",
   "minAppVersion": "1.0.0",
   "description": "Automatically tags notes and creates structural links (siblings, parents, children) based on folder hierarchy.",
+  "author": "Pine885",
+  "authorUrl": "https://github.com/Pine885",
   "isDesktopOnly": false
 }
