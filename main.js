@@ -165,13 +165,15 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         }
         const files = this.app.vault.getMarkdownFiles();
         let clearedCount = 0;
+        const yamlRegex = /^---\s*[\s\S]*?---\s*/;
         for (const file of files) {
-            await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-                Object.keys(frontmatter).forEach(key => {
-                    delete frontmatter[key];
-                });
+            await this.app.vault.process(file, (content) => {
+                if (yamlRegex.test(content)) {
+                    clearedCount++;
+                    return content.replace(yamlRegex, '').trimStart();
+                }
+                return content;
             });
-            clearedCount++;
         }
         new obsidian_1.Notice(`Cleared frontmatter from ${clearedCount} files.`);
     }
@@ -406,44 +408,34 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         }
         let updated = false;
         await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+            const backup = { ...frontmatter };
+            const targetMap = {};
             let isDirty = false;
-            const setProperty = (key, value) => {
-                if (JSON.stringify(frontmatter[key]) !== JSON.stringify(value)) {
-                    frontmatter[key] = value;
-                    isDirty = true;
-                }
-            };
-            const deleteProperty = (key) => {
-                if (key in frontmatter) {
-                    delete frontmatter[key];
-                    isDirty = true;
-                }
-            };
-            // 1. Handle Tags
+            // 1. Calculate Tags
+            let tags = [];
             if (this.settings.enableTagging) {
-                let tags = this.extractTagsFromPath(file);
-                // Automatically add tags for any detected cousin links
+                tags = this.extractTagsFromPath(file);
                 const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
                 for (const key of cousinKeys) {
                     const match = key.match(/^(.+)-\[R\]$/);
                     if (match) {
                         const folderTag = `#${match[1].replace(/\s+/g, '_')}`;
-                        if (!tags.includes(folderTag)) {
+                        if (!tags.includes(folderTag))
                             tags.push(folderTag);
-                        }
                     }
                 }
+            }
+            if (this.settings.enableTagging) {
                 if (tags.length > 0) {
-                    setProperty('tags', tags);
+                    targetMap['tags'] = tags;
                 }
                 else if (this.settings.tagDepth === 0) {
-                    deleteProperty('tags');
+                    targetMap['tags'] = [];
                 }
             }
-            // 2. Handle Nodes
+            // 2. Calculate Structural Data
             if (this.settings.enableLinking) {
                 const structuralData = [];
-                // 1. Parents (Far -> Near)
                 if (this.settings.linkDepth >= 2) {
                     const parents = this.findParentNodes(file, this.settings.linkDepth - 1);
                     parents.sort((a, b) => b.level - a.level).forEach(p => {
@@ -453,7 +445,6 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                         structuralData.push({ key: `${p.folderName}-[P${p.level}]`, value: p.notes });
                     });
                 }
-                // 2. Siblings
                 if (this.settings.linkDepth >= 1) {
                     if (this.settings.enableSummary && siblingSummary && siblingSummary.file !== file) {
                         structuralData.push({ key: `${folderName}-[TS]`, value: siblingSummary.text });
@@ -463,7 +454,6 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                         structuralData.push({ key: `${folderName}-[S]`, value: siblings });
                     }
                 }
-                // 3. Children (Near -> Far)
                 if (this.settings.linkDepth >= 2) {
                     const children = this.findChildrenNodes(file, this.settings.linkDepth - 1);
                     children.sort((a, b) => a.level - b.level).forEach(c => {
@@ -473,7 +463,6 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                         structuralData.push({ key: `${c.folderName}-[C${c.level}]`, value: c.notes });
                     });
                 }
-                // 4. Cousins
                 const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
                 for (const key of cousinKeys) {
                     const match = key.match(/^(.+)-\[R\]$/);
@@ -483,33 +472,31 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                             structuralData.push({ key: `${fName}-[TR]`, value: cousinSummaries.get(fName) });
                         }
                         const cousins = this.findCousinNodes(fName);
-                        const val = cousins.length > 0 ? cousins : '[No matching folder found]';
-                        structuralData.push({ key: key, value: val });
+                        structuralData.push({ key: key, value: cousins.length > 0 ? cousins : '[No matching folder found]' });
                     }
                 }
-                const currentStructuralKeys = Object.keys(frontmatter).filter(key => /-\[(S|P\d+|C\d+|R|TS|TP\d+|TC\d+|TR)\]$/.test(key));
-                const desiredKeys = structuralData.map(d => d.key);
-                const isOrderCorrect = currentStructuralKeys.length === desiredKeys.length &&
-                    currentStructuralKeys.every((key, i) => key === desiredKeys[i]);
-                const valuesMatch = structuralData.every(d => JSON.stringify(frontmatter[d.key]) === JSON.stringify(d.value));
-                if (!isOrderCorrect || !valuesMatch) {
-                    currentStructuralKeys.forEach(key => delete frontmatter[key]);
-                    structuralData.forEach(d => {
-                        frontmatter[d.key] = d.value;
-                    });
-                    isDirty = true;
-                }
+                structuralData.forEach(d => { targetMap[d.key] = d.value; });
             }
             else {
+                // If linking disabled, we still preserve Cousin keys but empty them
                 Object.keys(frontmatter).forEach(key => {
-                    if (/^(.+)-\[R\]$/.test(key)) {
-                        setProperty(key, []);
-                    }
-                    else if (/-\[(S|P\d+|C\d+|TS|TP\d+|TC\d+|TR)\]$/.test(key)) {
-                        deleteProperty(key);
-                    }
+                    if (/^(.+)-\[R\]$/.test(key))
+                        targetMap[key] = [];
                 });
             }
+            // 3. Add remaining keys
+            Object.keys(backup).forEach(key => {
+                if (!(key in targetMap)) {
+                    targetMap[key] = backup[key];
+                }
+            });
+            // 4. Mutate original object to enforce order
+            Object.keys(frontmatter).forEach(k => delete frontmatter[k]);
+            Object.entries(targetMap).forEach(([k, v]) => {
+                frontmatter[k] = v;
+            });
+            // 5. Dirty check
+            isDirty = JSON.stringify(backup) !== JSON.stringify(frontmatter);
             updated = isDirty;
         });
         return updated;

@@ -48,7 +48,7 @@ Designed for large vaults and seamless workflows.
 
 ### Auto Tag Settings
 - **Enable Tagging**: Toggle path-to-tag conversion.
-- **Tag Depth**: `0` = Cousins only, `1` = Immediate parent, `2+` = Hierarchy.
+- **Tag Depth**: `0` = Clear tags, `1` = Immediate parent, `2+` = Hierarchy.
 
 ### Auto Link Settings
 - **Enable Linking**: Toggle structural linking.
