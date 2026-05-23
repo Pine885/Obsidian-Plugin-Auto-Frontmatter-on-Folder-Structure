@@ -37,7 +37,7 @@ Designed for large vaults and seamless workflows.
 
 ### 🧹 Maintenance & Safety
 - **Ghost Key Removal**: Automatically detects and deletes obsolete structural keys when folders are renamed or moved.
-- **Excluded Folders**: Completely ignore specific directories (e.g., `Archive`, `Templates`) to keep your metadata clean.
+- **Folder Targets**: Precisely control which notes are processed using Whitelist and Blacklist filters.
 - **Vault-Wide Wipe**: A "Clear All Frontmatter" utility for a fresh start.
 
 ## ⚙️ Configuration Guide
@@ -53,13 +53,17 @@ Designed for large vaults and seamless workflows.
 ### Auto Link Settings
 - **Enable Linking**: Toggle structural linking.
 - **Link Depth**: `0` = Cousins only, `1` = Siblings + Cousins, `2+` = Hierarchy + Siblings + Cousins.
-- **Cousin Links**: Add `FolderName-[R]:` to your properties to link all notes in any folder named `FolderName` across your vault.
+- **Cousin Links**: Add `FolderName-[R]:` to your properties to link all notes in any folder named `FolderName` across your vault. This will also automatically add `#FolderName` to your tags.
 
 ### Summary Settings
 - **Enable Summary**: Toggle folder summary extraction.
 - **Full Text**: If disabled, only the first paragraph is used.
 - **Strict Summary Name**: If enabled, only files named exactly "summary" are used.
 - **Detection Priority**: The fixed hierarchy used to find summary files.
+
+### Folder Targets
+- **Whitelisted Folders**: Only process notes in these folders. If left empty, the plugin targets all folders in your vault.
+- **Blacklisted Folders**: Completely ignore specific directories (e.g., `Archive`, `Templates`) to keep your metadata clean.
 
 ## 📖 Frontmatter Reference
 

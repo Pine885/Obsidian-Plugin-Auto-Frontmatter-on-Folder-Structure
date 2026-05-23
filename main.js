@@ -5,7 +5,8 @@ const DEFAULT_SETTINGS = {
     enableTagging: false,
     enableLinking: false,
     includeTargetInTags: true,
-    excludedFolders: '',
+    whitelistedFolders: '',
+    blacklistedFolders: '',
     tagDepth: 99,
     linkDepth: 99,
     enableAutomation: false,
@@ -123,31 +124,35 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         const pathSegments = path.split('/');
         return pathSegments.includes(folder);
     }
-    isExcluded(file) {
-        const excludedFolders = this.settings.excludedFolders
+    shouldProcess(file) {
+        const whitelisted = this.settings.whitelistedFolders
             .split(',')
             .map(f => f.trim())
             .filter(f => f !== '');
-        return excludedFolders.some(folder => this.isPathInFolder(file.path, folder));
+        const blacklisted = this.settings.blacklistedFolders
+            .split(',')
+            .map(f => f.trim())
+            .filter(f => f !== '');
+        const isBlacklisted = blacklisted.some(folder => this.isPathInFolder(file.path, folder));
+        if (isBlacklisted)
+            return false;
+        if (whitelisted.length === 0)
+            return true;
+        return whitelisted.some(folder => this.isPathInFolder(file.path, folder));
     }
     async updateFolderAndChildren(folder) {
         const files = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(folder.path + '/'));
         for (const file of files) {
-            if (!this.isExcluded(file)) {
+            if (this.shouldProcess(file)) {
                 await this.updateFileFrontmatter(file);
             }
         }
     }
     async runAutoTagger() {
         const files = this.app.vault.getMarkdownFiles();
-        const excludedFolders = this.settings.excludedFolders
-            .split(',')
-            .map(f => f.trim())
-            .filter(f => f !== '');
         let processedCount = 0;
         for (const file of files) {
-            const isExcluded = excludedFolders.some(folder => this.isPathInFolder(file.path, folder));
-            if (isExcluded)
+            if (!this.shouldProcess(file))
                 continue;
             await this.updateFileFrontmatter(file);
             processedCount++;
@@ -193,13 +198,13 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         if (!folderPath) {
             const allFiles = this.app.vault.getMarkdownFiles();
             return allFiles
-                .filter(f => f !== file && f.path.indexOf('/') === -1 && !this.isExcluded(f))
+                .filter(f => f !== file && f.path.indexOf('/') === -1 && this.shouldProcess(f))
                 .map(f => `[[${f.basename}]]`);
         }
         const folder = this.app.vault.getAbstractFileByPath(folderPath);
         if (folder instanceof obsidian_1.TFolder) {
             return folder.children
-                .filter(child => child instanceof obsidian_1.TFile && child !== file && child.extension === 'md' && !this.isExcluded(child))
+                .filter(child => child instanceof obsidian_1.TFile && child !== file && child.extension === 'md' && this.shouldProcess(child))
                 .map(child => `[[${child.basename}]]`);
         }
         return [];
@@ -212,7 +217,7 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         let currentPath = folderPath.substring(0, folderPath.lastIndexOf('/'));
         for (let d = 1; d <= depth; d++) {
             if (!currentPath) {
-                const rootFiles = this.app.vault.getMarkdownFiles().filter(f => f.path.indexOf('/') === -1 && !this.isExcluded(f));
+                const rootFiles = this.app.vault.getMarkdownFiles().filter(f => f.path.indexOf('/') === -1 && this.shouldProcess(f));
                 if (rootFiles.length > 0) {
                     results.push({ folderName: 'Root', level: d, notes: rootFiles.map(f => `[[${f.basename}]]`) });
                 }
@@ -221,7 +226,7 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
             const folder = this.app.vault.getAbstractFileByPath(currentPath);
             if (folder instanceof obsidian_1.TFolder) {
                 const notes = folder.children
-                    .filter(child => child instanceof obsidian_1.TFile && child.extension === 'md' && !this.isExcluded(child))
+                    .filter(child => child instanceof obsidian_1.TFile && child.extension === 'md' && this.shouldProcess(child))
                     .map(child => `[[${child.basename}]]`);
                 if (notes.length > 0) {
                     results.push({ folderName: folder.name, level: d, notes });
@@ -246,7 +251,7 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
             folder.children.forEach(child => {
                 if (child instanceof obsidian_1.TFolder) {
                     const notes = child.children
-                        .filter(gc => gc instanceof obsidian_1.TFile && gc.extension === 'md' && !this.isExcluded(gc))
+                        .filter(gc => gc instanceof obsidian_1.TFile && gc.extension === 'md' && this.shouldProcess(gc))
                         .map(gc => `[[${gc.basename}]]`);
                     if (notes.length > 0) {
                         results.push({ folderName: child.name, level: currentDepth, notes });
@@ -268,7 +273,7 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                 if (child instanceof obsidian_1.TFolder) {
                     if (child.name === folderName) {
                         const notes = child.children
-                            .filter(c => c instanceof obsidian_1.TFile && c.extension === 'md' && !this.isExcluded(c))
+                            .filter(c => c instanceof obsidian_1.TFile && c.extension === 'md' && this.shouldProcess(c))
                             .map(c => `[[${c.basename}]]`);
                         results.push(...notes);
                     }
@@ -340,7 +345,7 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         return { text, file: bestFile };
     }
     async updateFileFrontmatter(file) {
-        if (this.isExcluded(file))
+        if (!this.shouldProcess(file))
             return false;
         const folderPath = file.path.substring(0, file.path.lastIndexOf('/'));
         const folderName = folderPath.split('/').pop() || 'Root';
@@ -416,14 +421,22 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
             };
             // 1. Handle Tags
             if (this.settings.enableTagging) {
-                const tags = this.extractTagsFromPath(file);
-                if (this.settings.tagDepth === 0) {
-                    deleteProperty('tags');
+                let tags = this.extractTagsFromPath(file);
+                // Automatically add tags for any detected cousin links
+                const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+                for (const key of cousinKeys) {
+                    const match = key.match(/^(.+)-\[R\]$/);
+                    if (match) {
+                        const folderTag = `#${match[1].replace(/\s+/g, '_')}`;
+                        if (!tags.includes(folderTag)) {
+                            tags.push(folderTag);
+                        }
+                    }
                 }
-                else if (tags.length > 0) {
+                if (tags.length > 0) {
                     setProperty('tags', tags);
                 }
-                else {
+                else if (this.settings.tagDepth === 0) {
                     deleteProperty('tags');
                 }
             }
@@ -622,14 +635,23 @@ class AutoTaggerSettingTab extends obsidian_1.PluginSettingTab {
         new obsidian_1.Setting(containerEl)
             .setName('Summary Detection Priority')
             .setDesc(`Current hierarchy: ${this.plugin.settings.summaryPriority}`);
-        containerEl.createEl('h2', { text: 'Exclude Settings' });
+        containerEl.createEl('h2', { text: 'Folder Targets' });
         new obsidian_1.Setting(containerEl)
-            .setName('Excluded Folders')
+            .setName('Whitelisted Folders')
+            .setDesc('Only process files in these folders (comma-separated). If empty, all folders are targeted.')
+            .addText(text => text
+            .setValue(this.plugin.settings.whitelistedFolders)
+            .onChange(async (value) => {
+            this.plugin.settings.whitelistedFolders = value;
+            await this.plugin.saveSettings();
+        }));
+        new obsidian_1.Setting(containerEl)
+            .setName('Blacklisted Folders')
             .setDesc('Ignore files in these folders (comma-separated). e.g., "Archive" or "Templates/Old".')
             .addText(text => text
-            .setValue(this.plugin.settings.excludedFolders)
+            .setValue(this.plugin.settings.blacklistedFolders)
             .onChange(async (value) => {
-            this.plugin.settings.excludedFolders = value;
+            this.plugin.settings.blacklistedFolders = value;
             await this.plugin.saveSettings();
         }));
         containerEl.createEl('h2', { text: 'Danger Zone' });

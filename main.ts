@@ -4,7 +4,8 @@ interface AutoTaggerSettings {
     enableTagging: boolean;
     enableLinking: boolean;
     includeTargetInTags: boolean;
-    excludedFolders: string;
+    whitelistedFolders: string;
+    blacklistedFolders: string;
     tagDepth: number;
     linkDepth: number;
     enableAutomation: boolean;
@@ -19,7 +20,8 @@ const DEFAULT_SETTINGS: AutoTaggerSettings = {
     enableTagging: false,
     enableLinking: false,
     includeTargetInTags: true,
-    excludedFolders: '',
+    whitelistedFolders: '',
+    blacklistedFolders: '',
     tagDepth: 99,
     linkDepth: 99,
     enableAutomation: false,
@@ -159,18 +161,28 @@ export default class AutoTaggerPlugin extends Plugin {
         return pathSegments.includes(folder);
     }
 
-    private isExcluded(file: TFile): boolean {
-        const excludedFolders = this.settings.excludedFolders
+    private shouldProcess(file: TFile): boolean {
+        const whitelisted = this.settings.whitelistedFolders
             .split(',')
             .map(f => f.trim())
             .filter(f => f !== '');
-        return excludedFolders.some(folder => this.isPathInFolder(file.path, folder));
+        const blacklisted = this.settings.blacklistedFolders
+            .split(',')
+            .map(f => f.trim())
+            .filter(f => f !== '');
+
+        const isBlacklisted = blacklisted.some(folder => this.isPathInFolder(file.path, folder));
+        if (isBlacklisted) return false;
+
+        if (whitelisted.length === 0) return true;
+
+        return whitelisted.some(folder => this.isPathInFolder(file.path, folder));
     }
 
     private async updateFolderAndChildren(folder: TFolder) {
         const files = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(folder.path + '/'));
         for (const file of files) {
-            if (!this.isExcluded(file)) {
+            if (this.shouldProcess(file)) {
                 await this.updateFileFrontmatter(file);
             }
         }
@@ -179,16 +191,10 @@ export default class AutoTaggerPlugin extends Plugin {
     async runAutoTagger() {
         const files = this.app.vault.getMarkdownFiles();
         
-        const excludedFolders = this.settings.excludedFolders
-            .split(',')
-            .map(f => f.trim())
-            .filter(f => f !== '');
-
         let processedCount = 0;
 
         for (const file of files) {
-            const isExcluded = excludedFolders.some(folder => this.isPathInFolder(file.path, folder));
-            if (isExcluded) continue;
+            if (!this.shouldProcess(file)) continue;
 
             await this.updateFileFrontmatter(file);
             processedCount++;
@@ -243,14 +249,14 @@ export default class AutoTaggerPlugin extends Plugin {
         if (!folderPath) {
             const allFiles = this.app.vault.getMarkdownFiles();
             return allFiles
-                .filter(f => f !== file && f.path.indexOf('/') === -1 && !this.isExcluded(f))
+                .filter(f => f !== file && f.path.indexOf('/') === -1 && this.shouldProcess(f))
                 .map(f => `[[${f.basename}]]`);
         }
 
         const folder = this.app.vault.getAbstractFileByPath(folderPath);
         if (folder instanceof TFolder) {
             return folder.children
-                .filter(child => child instanceof TFile && child !== file && child.extension === 'md' && !this.isExcluded(child))
+                .filter(child => child instanceof TFile && child !== file && child.extension === 'md' && this.shouldProcess(child))
                 .map(child => `[[${(child as TFile).basename}]]`);
         }
 
@@ -267,7 +273,7 @@ export default class AutoTaggerPlugin extends Plugin {
         
         for (let d = 1; d <= depth; d++) {
             if (!currentPath) {
-                const rootFiles = this.app.vault.getMarkdownFiles().filter(f => f.path.indexOf('/') === -1 && !this.isExcluded(f));
+                const rootFiles = this.app.vault.getMarkdownFiles().filter(f => f.path.indexOf('/') === -1 && this.shouldProcess(f));
                 if (rootFiles.length > 0) {
                     results.push({ folderName: 'Root', level: d, notes: rootFiles.map(f => `[[${f.basename}]]`) });
                 }
@@ -277,7 +283,7 @@ export default class AutoTaggerPlugin extends Plugin {
             const folder = this.app.vault.getAbstractFileByPath(currentPath);
             if (folder instanceof TFolder) {
                 const notes = folder.children
-                    .filter(child => child instanceof TFile && child.extension === 'md' && !this.isExcluded(child))
+                    .filter(child => child instanceof TFile && child.extension === 'md' && this.shouldProcess(child))
                     .map(child => `[[${(child as TFile).basename}]]`);
                 
                 if (notes.length > 0) {
@@ -304,7 +310,7 @@ export default class AutoTaggerPlugin extends Plugin {
             folder.children.forEach(child => {
                 if (child instanceof TFolder) {
                     const notes = child.children
-                        .filter(gc => gc instanceof TFile && gc.extension === 'md' && !this.isExcluded(gc))
+                        .filter(gc => gc instanceof TFile && gc.extension === 'md' && this.shouldProcess(gc))
                         .map(gc => `[[${(gc as TFile).basename}]]`);
                     
                     if (notes.length > 0) {
@@ -330,7 +336,7 @@ export default class AutoTaggerPlugin extends Plugin {
                 if (child instanceof TFolder) {
                     if (child.name === folderName) {
                         const notes = child.children
-                            .filter(c => c instanceof TFile && c.extension === 'md' && !this.isExcluded(c as TFile))
+                            .filter(c => c instanceof TFile && c.extension === 'md' && this.shouldProcess(c as TFile))
                             .map(c => `[[${(c as TFile).basename}]]`);
                         results.push(...notes);
                     }
@@ -413,7 +419,7 @@ export default class AutoTaggerPlugin extends Plugin {
     }
 
     async updateFileFrontmatter(file: TFile): Promise<boolean> {
-        if (this.isExcluded(file)) return false;
+        if (!this.shouldProcess(file)) return false;
         const folderPath = file.path.substring(0, file.path.lastIndexOf('/'));
         const folderName = folderPath.split('/').pop() || 'Root';
         const currentFolder = this.app.vault.getAbstractFileByPath(folderPath);
@@ -494,12 +500,23 @@ export default class AutoTaggerPlugin extends Plugin {
 
             // 1. Handle Tags
             if (this.settings.enableTagging) {
-                const tags = this.extractTagsFromPath(file);
-                if (this.settings.tagDepth === 0) {
-                    deleteProperty('tags');
-                } else if (tags.length > 0) {
+                let tags = this.extractTagsFromPath(file);
+
+                // Automatically add tags for any detected cousin links
+                const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+                for (const key of cousinKeys) {
+                    const match = key.match(/^(.+)-\[R\]$/);
+                    if (match) {
+                        const folderTag = `#${match[1].replace(/\s+/g, '_')}`;
+                        if (!tags.includes(folderTag)) {
+                            tags.push(folderTag);
+                        }
+                    }
+                }
+
+                if (tags.length > 0) {
                     setProperty('tags', tags);
-                } else {
+                } else if (this.settings.tagDepth === 0) {
                     deleteProperty('tags');
                 }
             }
@@ -729,15 +746,25 @@ class AutoTaggerSettingTab extends PluginSettingTab {
             .setDesc(`Current hierarchy: ${this.plugin.settings.summaryPriority}`);
 
 
-        containerEl.createEl('h2', { text: 'Exclude Settings' });
+        containerEl.createEl('h2', { text: 'Folder Targets' });
 
         new Setting(containerEl)
-            .setName('Excluded Folders')
+            .setName('Whitelisted Folders')
+            .setDesc('Only process files in these folders (comma-separated). If empty, all folders are targeted.')
+            .addText(text => text
+                .setValue(this.plugin.settings.whitelistedFolders)
+                .onChange(async (value) => {
+                    this.plugin.settings.whitelistedFolders = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Blacklisted Folders')
             .setDesc('Ignore files in these folders (comma-separated). e.g., "Archive" or "Templates/Old".')
             .addText(text => text
-                .setValue(this.plugin.settings.excludedFolders)
+                .setValue(this.plugin.settings.blacklistedFolders)
                 .onChange(async (value) => {
-                    this.plugin.settings.excludedFolders = value;
+                    this.plugin.settings.blacklistedFolders = value;
                     await this.plugin.saveSettings();
                 }));
 
