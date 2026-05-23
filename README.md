@@ -86,14 +86,14 @@ Designed for large vaults and seamless workflows.
 tags:
   - #Active
   - #Work
-Projects-[P2]: [[Project Root]]
 Projects-[TP2]: "The main project hub."
-Active-[P1]: [[Active Folder Note]]
+Projects-[P2]: [[Project Root]]
 Active-[TP1]: "Current active projects."
-Work-[S]: [[Note A], [Note B]]
+Active-[P1]: [[Active Folder Note]]
 Work-[TS]: "Work-related tasks and notes."
-Work-[C1]: [[Sub-task 1], [Sub-task 2]]
+Work-[S]: [[Note A], [Note B]]
 Work-[TC1]: "Detailed sub-task breakdown."
+Work-[C1]: [[Sub-task 1], [Sub-task 2]]
 Resources-[TR]: "Global resource library."
 Resources-[R]: [[Resource A], [Resource B]]
 ```
