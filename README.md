@@ -65,14 +65,14 @@ Designed for large vaults and seamless workflows.
 
 | Suffix | Meaning | Description |
 | :--- | :--- | :--- |
-| `-[P n]` | Parent (Level n) | Link to the note in the parent folder at depth `n`. |
 | `-[TP n]` | Parent Summary | Summary of the parent folder at depth `n`. |
-| `-[S]` | Siblings | Links to other notes in the same folder. |
+| `-[P n]` | Parent (Level n) | Link to the note in the parent folder at depth `n`. |
 | `-[TS]` | Sibling Summary | Summary of the current folder. |
-| `-[C n]` | Child (Level n) | Links to notes in subfolders at depth `n`. |
+| `-[S]` | Siblings | Links to other notes in the same folder. |
 | `-[TC n]` | Child Summary | Summary of the subfolder at depth `n`. |
-| `-[R]` | Cousins | Links to notes in any folder with the specified name. |
+| `-[C n]` | Child (Level n) | Links to notes in subfolders at depth `n`. |
 | `-[TR]` | Cousin Summary | Summary of the cousin folder. |
+| `-[R]` | Cousins | Links to notes in any folder with the specified name. |
 
 ## 📝 Example
 
