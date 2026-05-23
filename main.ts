@@ -8,6 +8,11 @@ interface AutoTaggerSettings {
     tagDepth: number;
     linkDepth: number;
     enableAutomation: boolean;
+    enableSummary: boolean;
+    fullText: boolean;
+    strictSummaryName: boolean;
+    summaryPriority: string;
+    queueDelay: number;
 }
 
 const DEFAULT_SETTINGS: AutoTaggerSettings = {
@@ -17,20 +22,27 @@ const DEFAULT_SETTINGS: AutoTaggerSettings = {
     excludedFolders: '',
     tagDepth: 99,
     linkDepth: 99,
-    enableAutomation: false
+    enableAutomation: false,
+    enableSummary: false,
+    fullText: false,
+    strictSummaryName: false,
+    summaryPriority: 'Exact > StartsWith > EndsWith > Contains',
+    queueDelay: 500
 }
 
 export default class AutoTaggerPlugin extends Plugin {
     settings!: AutoTaggerSettings;
+    private updateQueue: Set<TFile> = new Set();
+    private queueTimeout: any = null;
 
     async onload() {
-        console.log('Auto Tag & Link Notes to Folder Structure plugin loaded');
+        console.log('Auto Frontmatter on Folder Structure plugin loaded');
 
         await this.loadSettings();
 
         this.addCommand({
             id: 'run-auto-tagger',
-            name: 'Run Auto-Tagger',
+            name: 'Run Auto Frontmatter',
             callback: async () => {
                 await this.runAutoTagger();
             }
@@ -44,7 +56,7 @@ export default class AutoTaggerPlugin extends Plugin {
             }
         });
 
-        this.addRibbonIcon('tag', 'Run Auto-Tagger', async () => {
+        this.addRibbonIcon('tag', 'Run Auto Frontmatter', async () => {
             await this.runAutoTagger();
         });
 
@@ -55,25 +67,21 @@ export default class AutoTaggerPlugin extends Plugin {
                 if (!this.settings.enableAutomation) return;
 
                 if (file instanceof TFile) {
-                    // Update the moved file
-                    await this.updateFileFrontmatter(file);
+                    this.queueUpdate(file);
 
-                    // Update old folder context
                     const oldFolderPath = oldPath.substring(0, oldPath.lastIndexOf('/'));
                     const oldFolder = this.app.vault.getAbstractFileByPath(oldFolderPath);
                     if (oldFolder instanceof TFolder) {
-                        await this.updateFolderAndChildren(oldFolder);
+                        this.queueFolder(oldFolder);
                     }
 
-                    // Update new folder context
                     const newFolderPath = file.path.substring(0, file.path.lastIndexOf('/'));
                     const newFolder = this.app.vault.getAbstractFileByPath(newFolderPath);
                     if (newFolder instanceof TFolder) {
-                        await this.updateFolderAndChildren(newFolder);
+                        this.queueFolder(newFolder);
                     }
                 } else if (file instanceof TFolder) {
-                    // Update all files in the renamed folder
-                    await this.updateFolderAndChildren(file);
+                    this.queueFolder(file);
                 }
             })
         );
@@ -83,13 +91,21 @@ export default class AutoTaggerPlugin extends Plugin {
                 if (!this.settings.enableAutomation) return;
 
                 if (file instanceof TFile) {
-                    // We can't get the folder from the file after it's deleted in some versions,
-                    // but usually the file object still has the path.
                     const folderPath = file.path.substring(0, file.path.lastIndexOf('/'));
                     const folder = this.app.vault.getAbstractFileByPath(folderPath);
                     if (folder instanceof TFolder) {
-                        await this.updateFolderAndChildren(folder);
+                        this.queueFolder(folder);
                     }
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.workspace.on('active-leaf-change', (leaf) => {
+                if (!this.settings.enableAutomation) return;
+                const file = this.app.workspace.getActiveFile();
+                if (file) {
+                    this.queueUpdate(file);
                 }
             })
         );
@@ -101,6 +117,36 @@ export default class AutoTaggerPlugin extends Plugin {
 
     async saveSettings() {
         await this.saveData(this.settings);
+    }
+
+    private queueUpdate(file: TFile) {
+        this.updateQueue.add(file);
+        if (this.queueTimeout) clearTimeout(this.queueTimeout);
+        this.queueTimeout = setTimeout(() => this.processQueue(), this.settings.queueDelay);
+    }
+
+    private queueFolder(folder: TFolder) {
+        const files = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(folder.path + '/'));
+        files.forEach(f => this.updateQueue.add(f));
+        if (this.queueTimeout) clearTimeout(this.queueTimeout);
+        this.queueTimeout = setTimeout(() => this.processQueue(), this.settings.queueDelay);
+    }
+
+    private async processQueue() {
+        const filesToUpdate = new Set(this.updateQueue);
+        this.updateQueue.clear();
+        this.queueTimeout = null;
+
+        let updatedCount = 0;
+        for (const file of filesToUpdate) {
+            if (await this.updateFileFrontmatter(file)) {
+                updatedCount++;
+            }
+        }
+
+        if (updatedCount > 0) {
+            new Notice(`Auto Frontmatter updated ${updatedCount} file(s).`);
+        }
     }
 
     private isPathInFolder(path: string, folder: string): boolean {
@@ -148,7 +194,7 @@ export default class AutoTaggerPlugin extends Plugin {
             processedCount++;
         }
 
-        new Notice(`Auto-Tagger processed ${processedCount} files.`);
+        new Notice(`Auto Frontmatter processed ${processedCount} files.`);
     }
 
     async clearAllFrontmatter() {
@@ -297,81 +343,246 @@ export default class AutoTaggerPlugin extends Plugin {
         return results;
     }
 
-    async updateFileFrontmatter(file: TFile) {
-        const folderName = file.path.split('/').slice(-2, -1)[0] || 'Root';
+    private findFolderByName(root: TFolder, name: string): TFolder | null {
+        const traverse = (folder: TFolder): TFolder | null => {
+            if (folder.name === name) return folder;
+            for (const child of folder.children) {
+                if (child instanceof TFolder) {
+                    const found = traverse(child);
+                    if (found) return found;
+                }
+            }
+            return null;
+        };
+        return traverse(root);
+    }
 
+    private async getFolderSummary(folder: TFolder): Promise<{ text: string, file: TFile } | null> {
+        const keyword = 'summary';
+        const files = folder.children.filter(child => child instanceof TFile && child.extension === 'md') as TFile[];
+        
+        if (files.length === 0) return null;
+
+        let bestFile: TFile | null = null;
+
+        if (this.settings.strictSummaryName) {
+            bestFile = files.find(f => f.basename.toLowerCase() === keyword) || null;
+        } else {
+            // Priority 1: Exact match
+            bestFile = files.find(f => f.basename.toLowerCase() === keyword) || null;
+            
+            // Priority 2: Starts with
+            if (!bestFile) {
+                bestFile = files.find(f => f.basename.toLowerCase().startsWith(keyword)) || null;
+            }
+
+            // Priority 3: Ends with
+            if (!bestFile) {
+                bestFile = files.find(f => f.basename.toLowerCase().endsWith(keyword)) || null;
+            }
+
+            // Priority 4: Contains
+            if (!bestFile) {
+                bestFile = files.find(f => f.basename.toLowerCase().includes(keyword)) || null;
+            }
+        }
+
+        if (!bestFile) return null;
+
+        const content = await this.app.vault.read(bestFile);
+        
+        // Strip YAML frontmatter
+        const yamlRegex = /^---\s*[\s\S]*?---\s*/;
+        let text = content.replace(yamlRegex, '').trim();
+
+        // Handle first paragraph logic (skip headers)
+        if (!this.settings.fullText) {
+            const paragraphs = text.split(/\n\s*\n/);
+            const firstBodyParagraph = paragraphs.find(p => !p.trim().startsWith('#'));
+            text = firstBodyParagraph ? firstBodyParagraph.trim() : paragraphs[0].trim();
+        }
+
+        // Strip markdown formatting for plain text
+        text = text
+            .replace(/\[\[([^\]]+)\]\]/g, (match, p1) => p1.includes('|') ? p1.split('|')[1] : p1)
+            .replace(/[\*_~`]/g, '')       // Remove bold, italic, strikethrough, inline code
+            .replace(/^#+\s+/gm, '')       // Remove headers from the start of lines
+            .trim();
+
+        return { text, file: bestFile };
+    }
+
+    async updateFileFrontmatter(file: TFile): Promise<boolean> {
+        if (this.isExcluded(file)) return false;
+        const folderPath = file.path.substring(0, file.path.lastIndexOf('/'));
+        const folderName = folderPath.split('/').pop() || 'Root';
+        const currentFolder = this.app.vault.getAbstractFileByPath(folderPath);
+
+        // Pre-fetch summaries if enabled to avoid async calls inside processFrontMatter
+        let siblingSummary: { text: string, file: TFile } | null = null;
+        const parentSummaries: Map<string, string> = new Map();
+        const childSummaries: Map<string, string> = new Map();
+        const cousinSummaries: Map<string, string> = new Map();
+
+        if (this.settings.enableSummary) {
+            if (currentFolder instanceof TFolder) {
+                siblingSummary = await this.getFolderSummary(currentFolder);
+            }
+
+            if (this.settings.linkDepth >= 2) {
+                const parents = this.findParentNodes(file, this.settings.linkDepth - 1);
+                for (const p of parents) {
+                    const pathSegments = file.path.split('/');
+                    const folderDepth = pathSegments.length - 1;
+                    const targetDepth = folderDepth - p.level;
+                    const pFolder = this.app.vault.getAbstractFileByPath(pathSegments.slice(0, targetDepth).join('/'));
+                    if (pFolder instanceof TFolder) {
+                        const sum = await this.getFolderSummary(pFolder);
+                        if (sum) parentSummaries.set(p.folderName, sum.text);
+                    }
+                }
+
+                const children = this.findChildrenNodes(file, this.settings.linkDepth - 1);
+                for (const c of children) {
+                    const cFolder = currentFolder instanceof TFolder
+                        ? currentFolder.children.find(child => child instanceof TFolder && child.name === c.folderName)
+                        : null;
+                    if (cFolder instanceof TFolder) {
+                        const sum = await this.getFolderSummary(cFolder);
+                        if (sum) childSummaries.set(c.folderName, sum.text);
+                    }
+                }
+            }
+
+            const content = await this.app.vault.read(file);
+            const yamlRegex = /^---\s*[\s\S]*?---\s*/;
+            const frontmatterMatch = content.match(yamlRegex);
+            if (frontmatterMatch) {
+                const frontmatterText = frontmatterMatch[0];
+                const cousinKeys = Object.keys(this.app.metadataCache.getFileCache(file)?.frontmatter || {}).filter(key => /^(.+)-\[R\]$/.test(key));
+                for (const key of cousinKeys) {
+                    const fName = key.match(/^(.+)-\[R\]$/)![1];
+                    const allFolders = this.app.vault.getAbstractFileByPath('/');
+                    if (allFolders instanceof TFolder) {
+                        const foundFolder = this.findFolderByName(allFolders, fName);
+                        if (foundFolder) {
+                            const sum = await this.getFolderSummary(foundFolder);
+                            if (sum) cousinSummaries.set(fName, sum.text);
+                        }
+                    }
+                }
+            }
+        }
+
+        let updated = false;
         await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+            let isDirty = false;
+
+            const setProperty = (key: string, value: any) => {
+                if (JSON.stringify(frontmatter[key]) !== JSON.stringify(value)) {
+                    frontmatter[key] = value;
+                    isDirty = true;
+                }
+            };
+
+            const deleteProperty = (key: string) => {
+                if (key in frontmatter) {
+                    delete frontmatter[key];
+                    isDirty = true;
+                }
+            };
+
             // 1. Handle Tags
             if (this.settings.enableTagging) {
                 const tags = this.extractTagsFromPath(file);
                 if (this.settings.tagDepth === 0) {
-                    delete frontmatter['tags'];
+                    deleteProperty('tags');
                 } else if (tags.length > 0) {
-                    frontmatter['tags'] = tags;
+                    setProperty('tags', tags);
                 } else {
-                    delete frontmatter['tags'];
+                    deleteProperty('tags');
                 }
             }
             
             // 2. Handle Nodes
             if (this.settings.enableLinking) {
-                // Capture Cousin keys before cleanup to prevent deletion
-                const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+                const structuralData: { key: string, value: any }[] = [];
 
-                // Clear existing node keys to ensure order P -> S -> C -> R
-                Object.keys(frontmatter).forEach(key => {
-                    if (/-\[(S|P\d+|C\d+|R)\]$/.test(key)) {
-                        delete frontmatter[key];
-                    }
-                });
-
-                // Parents (Far -> Near)
+                // 1. Parents (Far -> Near)
                 if (this.settings.linkDepth >= 2) {
                     const parents = this.findParentNodes(file, this.settings.linkDepth - 1);
                     parents.sort((a, b) => b.level - a.level).forEach(p => {
-                        frontmatter[`${p.folderName}-[P${p.level}]`] = p.notes;
+                        if (this.settings.enableSummary && parentSummaries.has(p.folderName)) {
+                            structuralData.push({ key: `${p.folderName}-[TP${p.level}]`, value: parentSummaries.get(p.folderName) });
+                        }
+                        structuralData.push({ key: `${p.folderName}-[P${p.level}]`, value: p.notes });
                     });
                 }
 
-                // Siblings
+                // 2. Siblings
                 if (this.settings.linkDepth >= 1) {
+                    if (this.settings.enableSummary && siblingSummary && siblingSummary.file !== file) {
+                        structuralData.push({ key: `${folderName}-[TS]`, value: siblingSummary.text });
+                    }
                     const siblings = this.findSiblingNodes(file);
                     if (siblings.length > 0) {
-                        frontmatter[`${folderName}-[S]`] = siblings;
+                        structuralData.push({ key: `${folderName}-[S]`, value: siblings });
                     }
                 }
 
-                // Children (Near -> Far)
+                // 3. Children (Near -> Far)
                 if (this.settings.linkDepth >= 2) {
                     const children = this.findChildrenNodes(file, this.settings.linkDepth - 1);
                     children.sort((a, b) => a.level - b.level).forEach(c => {
-                        frontmatter[`${c.folderName}-[C${c.level}]`] = c.notes;
+                        if (this.settings.enableSummary && childSummaries.has(c.folderName)) {
+                            structuralData.push({ key: `${c.folderName}-[TC${c.level}]`, value: childSummaries.get(c.folderName) });
+                        }
+                        structuralData.push({ key: `${c.folderName}-[C${c.level}]`, value: c.notes });
                     });
                 }
 
-                // Cousin Links (User-driven) - Always processed if enableLinking is true
-                cousinKeys.forEach(key => {
+                // 4. Cousins
+                const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+                for (const key of cousinKeys) {
                     const match = key.match(/^(.+)-\[R\]$/);
                     if (match) {
-                        const folderName = match[1];
-                        const cousins = this.findCousinNodes(folderName);
-                        if (cousins.length > 0) {
-                            frontmatter[key] = cousins;
-                        } else {
-                            frontmatter[key] = '[No matching folder found]';
+                        const fName = match[1];
+                        if (this.settings.enableSummary && cousinSummaries.has(fName)) {
+                            structuralData.push({ key: `${fName}-[TR]`, value: cousinSummaries.get(fName) });
                         }
+                        const cousins = this.findCousinNodes(fName);
+                        const val = cousins.length > 0 ? cousins : '[No matching folder found]';
+                        structuralData.push({ key: key, value: val });
                     }
-                });
+                }
+
+                const currentStructuralKeys = Object.keys(frontmatter).filter(key => /-\[(S|P\d+|C\d+|R|TS|TP\d+|TC\d+|TR)\]$/.test(key));
+                const desiredKeys = structuralData.map(d => d.key);
+
+                const isOrderCorrect = currentStructuralKeys.length === desiredKeys.length &&
+                                        currentStructuralKeys.every((key, i) => key === desiredKeys[i]);
+
+                const valuesMatch = structuralData.every(d => JSON.stringify(frontmatter[d.key]) === JSON.stringify(d.value));
+
+                if (!isOrderCorrect || !valuesMatch) {
+                    currentStructuralKeys.forEach(key => delete frontmatter[key]);
+                    structuralData.forEach(d => {
+                        frontmatter[d.key] = d.value;
+                    });
+                    isDirty = true;
+                }
             } else {
                 Object.keys(frontmatter).forEach(key => {
                     if (/^(.+)-\[R\]$/.test(key)) {
-                        frontmatter[key] = [];
-                    } else if (/-\[(S|P\d+|C\d+)\]$/.test(key)) {
-                        delete frontmatter[key];
+                        setProperty(key, []);
+                    } else if (/-\[(S|P\d+|C\d+|TS|TP\d+|TC\d+|TR)\]$/.test(key)) {
+                        deleteProperty(key);
                     }
                 });
             }
+            updated = isDirty;
         });
+        return updated;
     }
 }
 
@@ -398,7 +609,7 @@ class AutoTaggerSettingTab extends PluginSettingTab {
         ,});
         
         resetBtn.onclick = async () => {
-            if (confirm('Are you sure you want to reset all Auto Tag & Link Notes to Folder Structure settings to default?')) {
+            if (confirm('Are you sure you want to reset all Auto Frontmatter on Folder Structure settings to default?')) {
                 this.plugin.settings = Object.assign({}, DEFAULT_SETTINGS);
                 await this.plugin.saveSettings();
                 this.display();
@@ -406,15 +617,31 @@ class AutoTaggerSettingTab extends PluginSettingTab {
             }
         };
 
+        containerEl.createEl('h2', { text: 'Automation Settings' });
+
         new Setting(containerEl)
             .setName('Enable Automation')
-            .setDesc('Automatically update tags and links when files are moved, renamed, or deleted.')
+            .setDesc('Automatically update tags and links when files are moved, renamed, deleted, or opened.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.enableAutomation)
                 .onChange(async (value) => {
                     this.plugin.settings.enableAutomation = value;
                     await this.plugin.saveSettings();
                 }));
+
+        new Setting(containerEl)
+            .setName('Update Delay')
+            .setDesc('Time to wait (in milliseconds) before processing the update queue. Lower values are more responsive but may increase CPU usage.')
+            .addText(text => text
+                .setValue(this.plugin.settings.queueDelay.toString())
+                .onChange(async (value) => {
+                    this.plugin.settings.queueDelay = parseInt(value) || 500;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('⚠️ Automation Warning')
+            .setDesc('Enabling automation on very large vaults or with cloud sync (iCloud/Dropbox) may cause frequent file writes and potential sync loops.');
 
 
         containerEl.createEl('h2', { text: 'Auto Tag Settings' });
@@ -464,6 +691,43 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                 new Setting(containerEl)
                     .setName('Cousin Links')
                     .setDesc('💡 Tip: You can create "Cousin Links" by adding a key like "FolderName-[R]:" to your note\'s frontmatter. The plugin will automatically link all notes in any folder with that name across your vault.');
+
+        containerEl.createEl('h2', { text: 'Summary Settings' });
+
+        new Setting(containerEl)
+            .setName('Enable Summary')
+            .setDesc('Automatically add folder summaries to frontmatter if a summary file is found.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableSummary)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableSummary = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Full Text')
+            .setDesc('If disabled, only the first paragraph of the summary file will be used.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.fullText)
+                .onChange(async (value) => {
+                    this.plugin.settings.fullText = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Strict Summary Name')
+            .setDesc('If enabled, only files named exactly the summary keyword will be used.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.strictSummaryName)
+                .onChange(async (value) => {
+                    this.plugin.settings.strictSummaryName = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Summary Detection Priority')
+            .setDesc(`Current hierarchy: ${this.plugin.settings.summaryPriority}`);
+
 
         containerEl.createEl('h2', { text: 'Exclude Settings' });
 
