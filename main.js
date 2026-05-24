@@ -20,9 +20,11 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
     settings;
     updateQueue = new Set();
     queueTimeout = null;
+    folderCache = new Map();
     async onload() {
         console.log('Auto Frontmatter on Folder Structure plugin loaded');
         await this.loadSettings();
+        this.buildFolderCache();
         this.addCommand({
             id: 'run-auto-tagger',
             name: 'Run Auto Frontmatter',
@@ -61,6 +63,26 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                 this.queueFolder(file);
             }
         }));
+        this.registerEvent(this.app.vault.on('rename', async (file, oldPath) => {
+            if (file instanceof obsidian_1.TFolder) {
+                const oldFolderPath = oldPath.substring(0, oldPath.lastIndexOf('/'));
+                const oldFolder = this.app.vault.getAbstractFileByPath(oldFolderPath);
+                if (oldFolder instanceof obsidian_1.TFolder) {
+                    const list = this.folderCache.get(oldFolder.name);
+                    if (list) {
+                        const idx = list.indexOf(oldFolder);
+                        if (idx > -1)
+                            list.splice(idx, 1);
+                        if (list.length === 0)
+                            this.folderCache.delete(oldFolder.name);
+                    }
+                }
+                const name = file.name;
+                if (!this.folderCache.has(name))
+                    this.folderCache.set(name, []);
+                this.folderCache.get(name).push(file);
+            }
+        }));
         this.registerEvent(this.app.vault.on('delete', async (file) => {
             if (!this.settings.enableAutomation)
                 return;
@@ -69,6 +91,18 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                 const folder = this.app.vault.getAbstractFileByPath(folderPath);
                 if (folder instanceof obsidian_1.TFolder) {
                     this.queueFolder(folder);
+                }
+            }
+        }));
+        this.registerEvent(this.app.vault.on('delete', async (file) => {
+            if (file instanceof obsidian_1.TFolder) {
+                const list = this.folderCache.get(file.name);
+                if (list) {
+                    const idx = list.indexOf(file);
+                    if (idx > -1)
+                        list.splice(idx, 1);
+                    if (list.length === 0)
+                        this.folderCache.delete(file.name);
                 }
             }
         }));
@@ -123,6 +157,24 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         }
         const pathSegments = path.split('/');
         return pathSegments.includes(folder);
+    }
+    buildFolderCache() {
+        this.folderCache.clear();
+        const root = this.app.vault.getAbstractFileByPath('/') || this.app.vault.getAbstractFileByPath('');
+        if (!(root instanceof obsidian_1.TFolder))
+            return;
+        const traverse = (folder) => {
+            const name = folder.name;
+            if (!this.folderCache.has(name)) {
+                this.folderCache.set(name, []);
+            }
+            this.folderCache.get(name).push(folder);
+            folder.children.forEach(child => {
+                if (child instanceof obsidian_1.TFolder)
+                    traverse(child);
+            });
+        };
+        traverse(root);
     }
     shouldProcess(file) {
         const whitelisted = this.settings.whitelistedFolders
@@ -266,40 +318,21 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
         return results;
     }
     findCousinNodes(folderName) {
-        const results = [];
-        const allFolders = this.app.vault.getAbstractFileByPath('/');
-        if (!(allFolders instanceof obsidian_1.TFolder))
+        const folders = this.folderCache.get(folderName);
+        if (!folders)
             return [];
-        const traverse = (folder) => {
-            folder.children.forEach(child => {
-                if (child instanceof obsidian_1.TFolder) {
-                    if (child.name === folderName) {
-                        const notes = child.children
-                            .filter(c => c instanceof obsidian_1.TFile && c.extension === 'md' && this.shouldProcess(c))
-                            .map(c => `[[${c.basename}]]`);
-                        results.push(...notes);
-                    }
-                    traverse(child);
-                }
-            });
-        };
-        traverse(allFolders);
+        const results = [];
+        for (const folder of folders) {
+            const notes = folder.children
+                .filter(c => c instanceof obsidian_1.TFile && c.extension === 'md' && this.shouldProcess(c))
+                .map(c => `[[${c.basename}]]`);
+            results.push(...notes);
+        }
         return results;
     }
     findFolderByName(root, name) {
-        const traverse = (folder) => {
-            if (folder.name === name)
-                return folder;
-            for (const child of folder.children) {
-                if (child instanceof obsidian_1.TFolder) {
-                    const found = traverse(child);
-                    if (found)
-                        return found;
-                }
-            }
-            return null;
-        };
-        return traverse(root);
+        const folders = this.folderCache.get(name);
+        return folders && folders.length > 0 ? folders[0] : null;
     }
     async getFolderSummary(folder) {
         const keyword = 'summary';
@@ -484,9 +517,14 @@ class AutoTaggerPlugin extends obsidian_1.Plugin {
                         targetMap[key] = [];
                 });
             }
-            // 3. Add remaining keys
+            // 3. Add remaining keys (filtering out obsolete structural keys)
+            const structuralKeyRegex = /-\[(S|P\d+|C\d+|R|TS|TP\d+|TC\d+|TR)\]$/;
             Object.keys(backup).forEach(key => {
                 if (!(key in targetMap)) {
+                    // If it's a structural key but not in targetMap, it's obsolete
+                    if (structuralKeyRegex.test(key)) {
+                        return;
+                    }
                     targetMap[key] = backup[key];
                 }
             });

@@ -36,11 +36,13 @@ export default class AutoTaggerPlugin extends Plugin {
     settings!: AutoTaggerSettings;
     private updateQueue: Set<TFile> = new Set();
     private queueTimeout: any = null;
+    private folderCache: Map<string, TFolder[]> = new Map();
 
     async onload() {
         console.log('Auto Frontmatter on Folder Structure plugin loaded');
 
         await this.loadSettings();
+        this.buildFolderCache();
 
         this.addCommand({
             id: 'run-auto-tagger',
@@ -89,6 +91,26 @@ export default class AutoTaggerPlugin extends Plugin {
         );
 
         this.registerEvent(
+            this.app.vault.on('rename', async (file, oldPath) => {
+                if (file instanceof TFolder) {
+                    const oldFolderPath = oldPath.substring(0, oldPath.lastIndexOf('/'));
+                    const oldFolder = this.app.vault.getAbstractFileByPath(oldFolderPath);
+                    if (oldFolder instanceof TFolder) {
+                        const list = this.folderCache.get(oldFolder.name);
+                        if (list) {
+                            const idx = list.indexOf(oldFolder);
+                            if (idx > -1) list.splice(idx, 1);
+                            if (list.length === 0) this.folderCache.delete(oldFolder.name);
+                        }
+                    }
+                    const name = file.name;
+                    if (!this.folderCache.has(name)) this.folderCache.set(name, []);
+                    this.folderCache.get(name)!.push(file);
+                }
+            })
+        );
+
+        this.registerEvent(
             this.app.vault.on('delete', async (file) => {
                 if (!this.settings.enableAutomation) return;
 
@@ -97,6 +119,19 @@ export default class AutoTaggerPlugin extends Plugin {
                     const folder = this.app.vault.getAbstractFileByPath(folderPath);
                     if (folder instanceof TFolder) {
                         this.queueFolder(folder);
+                    }
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.vault.on('delete', async (file) => {
+                if (file instanceof TFolder) {
+                    const list = this.folderCache.get(file.name);
+                    if (list) {
+                        const idx = list.indexOf(file);
+                        if (idx > -1) list.splice(idx, 1);
+                        if (list.length === 0) this.folderCache.delete(file.name);
                     }
                 }
             })
@@ -159,6 +194,25 @@ export default class AutoTaggerPlugin extends Plugin {
         }
         const pathSegments = path.split('/');
         return pathSegments.includes(folder);
+    }
+
+    private buildFolderCache(): void {
+        this.folderCache.clear();
+        const root = this.app.vault.getAbstractFileByPath('/') || this.app.vault.getAbstractFileByPath('');
+        if (!(root instanceof TFolder)) return;
+
+        const traverse = (folder: TFolder) => {
+            const name = folder.name;
+            if (!this.folderCache.has(name)) {
+                this.folderCache.set(name, []);
+            }
+            this.folderCache.get(name)!.push(folder);
+
+            folder.children.forEach(child => {
+                if (child instanceof TFolder) traverse(child);
+            });
+        };
+        traverse(root);
     }
 
     private shouldProcess(file: TFile): boolean {
@@ -328,41 +382,22 @@ export default class AutoTaggerPlugin extends Plugin {
     }
 
     findCousinNodes(folderName: string): string[] {
+        const folders = this.folderCache.get(folderName);
+        if (!folders) return [];
+
         const results: string[] = [];
-        const allFolders = this.app.vault.getAbstractFileByPath('/');
-        
-        if (!(allFolders instanceof TFolder)) return [];
-
-        const traverse = (folder: TFolder) => {
-            folder.children.forEach(child => {
-                if (child instanceof TFolder) {
-                    if (child.name === folderName) {
-                        const notes = child.children
-                            .filter(c => c instanceof TFile && c.extension === 'md' && this.shouldProcess(c as TFile))
-                            .map(c => `[[${(c as TFile).basename}]]`);
-                        results.push(...notes);
-                    }
-                    traverse(child);
-                }
-            });
-        };
-
-        traverse(allFolders);
+        for (const folder of folders) {
+            const notes = folder.children
+                .filter(c => c instanceof TFile && c.extension === 'md' && this.shouldProcess(c as TFile))
+                .map(c => `[[${(c as TFile).basename}]]`);
+            results.push(...notes);
+        }
         return results;
     }
 
     private findFolderByName(root: TFolder, name: string): TFolder | null {
-        const traverse = (folder: TFolder): TFolder | null => {
-            if (folder.name === name) return folder;
-            for (const child of folder.children) {
-                if (child instanceof TFolder) {
-                    const found = traverse(child);
-                    if (found) return found;
-                }
-            }
-            return null;
-        };
-        return traverse(root);
+        const folders = this.folderCache.get(name);
+        return folders && folders.length > 0 ? folders[0] : null;
     }
 
     private async getFolderSummary(folder: TFolder): Promise<{ text: string, file: TFile } | null> {
@@ -560,9 +595,14 @@ export default class AutoTaggerPlugin extends Plugin {
                 });
             }
 
-            // 3. Add remaining keys
+            // 3. Add remaining keys (filtering out obsolete structural keys)
+            const structuralKeyRegex = /-\[(S|P\d+|C\d+|R|TS|TP\d+|TC\d+|TR)\]$/;
             Object.keys(backup).forEach(key => {
                 if (!(key in targetMap)) {
+                    // If it's a structural key but not in targetMap, it's obsolete
+                    if (structuralKeyRegex.test(key)) {
+                        return;
+                    }
                     targetMap[key] = backup[key];
                 }
             });
