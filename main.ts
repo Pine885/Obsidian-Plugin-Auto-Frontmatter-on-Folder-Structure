@@ -37,6 +37,7 @@ export default class AutoTaggerPlugin extends Plugin {
     private updateQueue: Set<TFile> = new Set();
     private queueTimeout: any = null;
     private folderCache: Map<string, TFolder[]> = new Map();
+    private readonly structuralKeyRegex = /-\[(S|P\d+|C\d+|R|TS|TP\d+|TC\d+|TR)\]$/;
 
     async onload() {
         console.log('Auto Frontmatter on Folder Structure plugin loaded');
@@ -76,36 +77,28 @@ export default class AutoTaggerPlugin extends Plugin {
                     const oldFolderPath = oldPath.substring(0, oldPath.lastIndexOf('/'));
                     const oldFolder = this.app.vault.getAbstractFileByPath(oldFolderPath);
                     if (oldFolder instanceof TFolder) {
-                        this.queueFolder(oldFolder);
+                        this.queueFolder(oldFolder, false);
                     }
 
                     const newFolderPath = file.path.substring(0, file.path.lastIndexOf('/'));
                     const newFolder = this.app.vault.getAbstractFileByPath(newFolderPath);
                     if (newFolder instanceof TFolder) {
-                        this.queueFolder(newFolder);
+                        this.queueFolder(newFolder, false);
                     }
                 } else if (file instanceof TFolder) {
-                    this.queueFolder(file);
-                }
-            })
-        );
-
-        this.registerEvent(
-            this.app.vault.on('rename', async (file, oldPath) => {
-                if (file instanceof TFolder) {
-                    const oldFolderPath = oldPath.substring(0, oldPath.lastIndexOf('/'));
-                    const oldFolder = this.app.vault.getAbstractFileByPath(oldFolderPath);
-                    if (oldFolder instanceof TFolder) {
-                        const list = this.folderCache.get(oldFolder.name);
-                        if (list) {
-                            const idx = list.indexOf(oldFolder);
-                            if (idx > -1) list.splice(idx, 1);
-                            if (list.length === 0) this.folderCache.delete(oldFolder.name);
-                        }
+                    // Update cache: remove from old name, add to new name
+                    const oldFolderName = oldPath.split('/').pop() || '';
+                    const list = this.folderCache.get(oldFolderName);
+                    if (list) {
+                        const idx = list.indexOf(file);
+                        if (idx > -1) list.splice(idx, 1);
+                        if (list.length === 0) this.folderCache.delete(oldFolderName);
                     }
-                    const name = file.name;
-                    if (!this.folderCache.has(name)) this.folderCache.set(name, []);
-                    this.folderCache.get(name)!.push(file);
+                    const newName = file.name;
+                    if (!this.folderCache.has(newName)) this.folderCache.set(newName, []);
+                    this.folderCache.get(newName)!.push(file);
+
+                    this.queueFolder(file);
                 }
             })
         );
@@ -118,15 +111,9 @@ export default class AutoTaggerPlugin extends Plugin {
                     const folderPath = file.path.substring(0, file.path.lastIndexOf('/'));
                     const folder = this.app.vault.getAbstractFileByPath(folderPath);
                     if (folder instanceof TFolder) {
-                        this.queueFolder(folder);
+                        this.queueFolder(folder, false);
                     }
-                }
-            })
-        );
-
-        this.registerEvent(
-            this.app.vault.on('delete', async (file) => {
-                if (file instanceof TFolder) {
+                } else if (file instanceof TFolder) {
                     const list = this.folderCache.get(file.name);
                     if (list) {
                         const idx = list.indexOf(file);
@@ -162,9 +149,19 @@ export default class AutoTaggerPlugin extends Plugin {
         this.queueTimeout = setTimeout(() => this.processQueue(), this.settings.queueDelay);
     }
 
-    private queueFolder(folder: TFolder) {
-        const files = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(folder.path + '/'));
-        files.forEach(f => this.updateQueue.add(f));
+    private queueFolder(folder: TFolder, recursive: boolean = true) {
+        const collectFiles = (f: TFolder) => {
+            f.children.forEach(child => {
+                if (child instanceof TFile && child.extension === 'md') {
+                    if (this.shouldProcess(child)) {
+                        this.updateQueue.add(child);
+                    }
+                } else if (child instanceof TFolder && recursive) {
+                    collectFiles(child);
+                }
+            });
+        };
+        collectFiles(folder);
         if (this.queueTimeout) clearTimeout(this.queueTimeout);
         this.queueTimeout = setTimeout(() => this.processQueue(), this.settings.queueDelay);
     }
@@ -198,8 +195,8 @@ export default class AutoTaggerPlugin extends Plugin {
 
     private buildFolderCache(): void {
         this.folderCache.clear();
-        const root = this.app.vault.getAbstractFileByPath('/') || this.app.vault.getAbstractFileByPath('');
-        if (!(root instanceof TFolder)) return;
+        const root = this.app.vault.getRoot();
+        if (!root) return;
 
         const traverse = (folder: TFolder) => {
             const name = folder.name;
@@ -233,14 +230,6 @@ export default class AutoTaggerPlugin extends Plugin {
         return whitelisted.some(folder => this.isPathInFolder(file.path, folder));
     }
 
-    private async updateFolderAndChildren(folder: TFolder) {
-        const files = this.app.vault.getMarkdownFiles().filter(f => f.path.startsWith(folder.path + '/'));
-        for (const file of files) {
-            if (this.shouldProcess(file)) {
-                await this.updateFileFrontmatter(file);
-            }
-        }
-    }
 
     async runAutoTagger() {
         const files = this.app.vault.getMarkdownFiles();
@@ -267,6 +256,11 @@ export default class AutoTaggerPlugin extends Plugin {
         const yamlRegex = /^---\s*[\s\S]*?---\s*/;
 
         for (const file of files) {
+            if (!this.shouldProcess(file)) continue;
+            
+            const cache = this.app.metadataCache.getFileCache(file);
+            if (!cache?.frontmatter) continue;
+
             await this.app.vault.process(file, (content) => {
                 if (yamlRegex.test(content)) {
                     clearedCount++;
@@ -287,7 +281,10 @@ export default class AutoTaggerPlugin extends Plugin {
             return [];
         }
 
-        let tags = pathParts.map(part => `#${part.replace(/\s+/g, '_')}`);
+        let tags = pathParts.map(part => {
+            const sanitized = part.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
+            return `#${sanitized}`;
+        });
         
         if (this.settings.tagDepth === 0) {
             return []; // Signal to clear tags
@@ -356,8 +353,8 @@ export default class AutoTaggerPlugin extends Plugin {
 
     findChildrenNodes(file: TFile, depth: number): { folderName: string, level: number, notes: string[] }[] {
         const results: { folderName: string, level: number, notes: string[] }[] = [];
-        const folderPath = file.path.substring(0, file.path.lastIndexOf('/'));
-        const rootFolder = this.app.vault.getAbstractFileByPath(folderPath);
+        const folderPath = file.path.split('/').slice(0, -1).join('/');
+        const rootFolder = this.app.vault.getAbstractFileByPath(folderPath) || this.app.vault.getRoot();
         if (!(rootFolder instanceof TFolder)) return [];
 
         const traverse = (folder: TFolder, currentDepth: number) => {
@@ -395,7 +392,12 @@ export default class AutoTaggerPlugin extends Plugin {
         return results;
     }
 
-    private findFolderByName(root: TFolder, name: string): TFolder | null {
+    /**
+     * Finds a folder by name using the cache.
+     * If multiple folders share the same name, the first one encountered during
+     * the initial vault scan is returned.
+     */
+    private findFolderByName(name: string): TFolder | null {
         const folders = this.folderCache.get(name);
         return folders && folders.length > 0 ? folders[0] : null;
     }
@@ -411,28 +413,34 @@ export default class AutoTaggerPlugin extends Plugin {
         if (this.settings.strictSummaryName) {
             bestFile = files.find(f => f.basename.toLowerCase() === keyword) || null;
         } else {
-            // Priority 1: Exact match
-            bestFile = files.find(f => f.basename.toLowerCase() === keyword) || null;
-            
-            // Priority 2: Starts with
-            if (!bestFile) {
-                bestFile = files.find(f => f.basename.toLowerCase().startsWith(keyword)) || null;
-            }
+            const priorityMap: Record<string, (name: string, keyword: string) => boolean> = {
+                'Exact': (name, keyword) => name === keyword,
+                'StartsWith': (name, keyword) => name.startsWith(keyword),
+                'EndsWith': (name, keyword) => name.endsWith(keyword),
+                'Contains': (name, keyword) => name.includes(keyword),
+            };
 
-            // Priority 3: Ends with
-            if (!bestFile) {
-                bestFile = files.find(f => f.basename.toLowerCase().endsWith(keyword)) || null;
-            }
+            const priorities = this.settings.summaryPriority
+                .split('>')
+                .map(p => p.trim())
+                .filter(p => priorityMap[p]);
 
-            // Priority 4: Contains
-            if (!bestFile) {
-                bestFile = files.find(f => f.basename.toLowerCase().includes(keyword)) || null;
+            for (const priority of priorities) {
+                const searchFn = priorityMap[priority];
+                bestFile = files.find(f => searchFn(f.basename.toLowerCase(), keyword)) || null;
+                if (bestFile) break;
             }
         }
 
         if (!bestFile) return null;
 
-        const content = await this.app.vault.read(bestFile);
+        let content: string;
+        try {
+            content = await this.app.vault.read(bestFile);
+        } catch (e) {
+            console.error(`AutoTagger: Failed to read summary file ${bestFile.path}`, e);
+            return null;
+        }
         
         // Strip YAML frontmatter
         const yamlRegex = /^---\s*[\s\S]*?---\s*/;
@@ -497,27 +505,124 @@ export default class AutoTaggerPlugin extends Plugin {
                 }
             }
 
-            const content = await this.app.vault.read(file);
-            const yamlRegex = /^---\s*[\s\S]*?---\s*/;
-            const frontmatterMatch = content.match(yamlRegex);
-            if (frontmatterMatch) {
-                const frontmatterText = frontmatterMatch[0];
-                const cousinKeys = Object.keys(this.app.metadataCache.getFileCache(file)?.frontmatter || {}).filter(key => /^(.+)-\[R\]$/.test(key));
-                for (const key of cousinKeys) {
-                    const fName = key.match(/^(.+)-\[R\]$/)![1];
-                    const allFolders = this.app.vault.getAbstractFileByPath('/');
-                    if (allFolders instanceof TFolder) {
-                        const foundFolder = this.findFolderByName(allFolders, fName);
-                        if (foundFolder) {
-                            const sum = await this.getFolderSummary(foundFolder);
-                            if (sum) cousinSummaries.set(fName, sum.text);
-                        }
+            const fileContent = await this.app.vault.read(file);
+            let cousinKeys: string[] = [];
+            const cache = this.app.metadataCache.getFileCache(file);
+            if (cache?.frontmatter) {
+                cousinKeys = Object.keys(cache.frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+            } else {
+                const match = fileContent.match(/^---\s*([\s\S]*?)\s*---\s*/);
+                if (match) {
+                    cousinKeys = match[1].split('\n')
+                        .map(line => line.split(':')[0].trim())
+                        .filter(key => /^(.+)-\[R\]$/.test(key));
+                }
+            }
+
+            for (const key of cousinKeys) {
+                const fName = key.match(/^(.+)-\[R\]$/)![1];
+                const root = this.app.vault.getRoot();
+                if (root instanceof TFolder) {
+                    const foundFolder = this.findFolderByName(fName);
+                    if (foundFolder) {
+                        const sum = await this.getFolderSummary(foundFolder);
+                        if (sum) cousinSummaries.set(fName, sum.text);
                     }
                 }
             }
         }
 
         let updated = false;
+
+        // Pre-flight dirty check to avoid unnecessary processFrontMatter calls
+        const currentCache = this.app.metadataCache.getFileCache(file);
+        const currentFrontmatter = currentCache?.frontmatter || {};
+        
+        const preFlightTargetMap: Record<string, any> = {};
+        
+        if (this.settings.enableTagging) {
+            let tags = this.extractTagsFromPath(file);
+            if (this.settings.includeTargetInTags) {
+                const cousinKeys = Object.keys(currentFrontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+                for (const key of cousinKeys) {
+                    const match = key.match(/^(.+)-\[R\]$/);
+                    if (match) {
+                        const folderName = match[1];
+                        const sanitized = folderName.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
+                        const folderTag = `#${sanitized}`;
+                        if (!tags.includes(folderTag)) tags.push(folderTag);
+                    }
+                }
+            }
+            if (tags.length > 0) {
+                preFlightTargetMap['tags'] = tags;
+            } else if (this.settings.tagDepth === 0) {
+                preFlightTargetMap['tags'] = [];
+            }
+        }
+
+        if (this.settings.enableLinking) {
+            const structuralData: { key: string, value: any }[] = [];
+            if (this.settings.linkDepth >= 2) {
+                const parents = this.findParentNodes(file, this.settings.linkDepth - 1);
+                parents.sort((a, b) => b.level - a.level).forEach(p => {
+                    if (this.settings.enableSummary && parentSummaries.has(p.folderName)) {
+                        structuralData.push({ key: `${p.folderName}-[TP${p.level}]`, value: parentSummaries.get(p.folderName) });
+                    }
+                    structuralData.push({ key: `${p.folderName}-[P${p.level}]`, value: p.notes });
+                });
+            }
+            if (this.settings.linkDepth >= 1) {
+                if (this.settings.enableSummary && siblingSummary && siblingSummary.file !== file) {
+                    structuralData.push({ key: `${folderName}-[TS]`, value: siblingSummary.text });
+                }
+                const siblings = this.findSiblingNodes(file);
+                if (siblings.length > 0) {
+                    structuralData.push({ key: `${folderName}-[S]`, value: siblings });
+                }
+            }
+            if (this.settings.linkDepth >= 2) {
+                const children = this.findChildrenNodes(file, this.settings.linkDepth - 1);
+                children.sort((a, b) => a.level - b.level).forEach(c => {
+                    if (this.settings.enableSummary && childSummaries.has(c.folderName)) {
+                        structuralData.push({ key: `${c.folderName}-[TC${c.level}]`, value: childSummaries.get(c.folderName) });
+                    }
+                    structuralData.push({ key: `${c.folderName}-[C${c.level}]`, value: c.notes });
+                });
+            }
+            const cousinKeys = Object.keys(currentFrontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+            for (const key of cousinKeys) {
+                const match = key.match(/^(.+)-\[R\]$/);
+                if (match) {
+                    const fName = match[1];
+                    if (this.settings.enableSummary && cousinSummaries.has(fName)) {
+                        structuralData.push({ key: `${fName}-[TR]`, value: cousinSummaries.get(fName) });
+                    }
+                    const cousins = this.findCousinNodes(fName);
+                    structuralData.push({ key: key, value: cousins.length > 0 ? cousins : '[No matching folder found]' });
+                }
+            }
+            structuralData.forEach(d => { preFlightTargetMap[d.key] = d.value; });
+        } else {
+            Object.keys(currentFrontmatter).forEach(key => {
+                if (/^(.+)-\[R\]$/.test(key)) preFlightTargetMap[key] = [];
+            });
+        }
+
+        Object.keys(currentFrontmatter).forEach(key => {
+            if (!(key in preFlightTargetMap)) {
+                // If it's a structural key but not in targetMap, it's obsolete
+                if (this.structuralKeyRegex.test(key)) {
+                    return;
+                }
+                preFlightTargetMap[key] = currentFrontmatter[key];
+            }
+        });
+
+        if (JSON.stringify(currentFrontmatter) === JSON.stringify(preFlightTargetMap)) {
+            return false;
+        }
+
         await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
             const backup = { ...frontmatter };
             const targetMap: Record<string, any> = {};
@@ -527,12 +632,16 @@ export default class AutoTaggerPlugin extends Plugin {
             let tags: string[] = [];
             if (this.settings.enableTagging) {
                 tags = this.extractTagsFromPath(file);
-                const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
-                for (const key of cousinKeys) {
-                    const match = key.match(/^(.+)-\[R\]$/);
-                    if (match) {
-                        const folderTag = `#${match[1].replace(/\s+/g, '_')}`;
-                        if (!tags.includes(folderTag)) tags.push(folderTag);
+                if (this.settings.includeTargetInTags) {
+                    const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+                    for (const key of cousinKeys) {
+                        const match = key.match(/^(.+)-\[R\]$/);
+                        if (match) {
+                            const folderName = match[1];
+                            const sanitized = folderName.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
+                            const folderTag = `#${sanitized}`;
+                            if (!tags.includes(folderTag)) tags.push(folderTag);
+                        }
                     }
                 }
             }
