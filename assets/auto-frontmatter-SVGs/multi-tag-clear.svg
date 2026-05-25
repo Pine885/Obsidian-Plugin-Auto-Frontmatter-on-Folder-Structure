@@ -1,0 +1,15 @@
+<svg viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" fill="none" width="18" height="18" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <g stroke-width="1.5" />
+    <g />
+    <g>
+        <g>
+            <g>
+                <path d="M14.1748 1.958l0 3.2168c0 0.8883 0.7201 1.6084 1.6084 1.6084l3.2168 0" />
+                <path d="M6.1329 19.042l11.2587 0c0.8883 0 1.6084-0.7201 1.6084-1.6084V5.979l-4.021-4.021-7.2377 0c-0.8883 0-1.6084 0.7201-1.6084 1.6084l0 2.4126" />
+                <path d="M9.1329 22.042l11.2587 0c0.8883 0 1.6084-0.7201 1.6084-1.6084V9.979" />
+            </g>
+            <g stroke-width="1.5" />
+        </g>
+        <line x1="2.5" x2="10.5" y1="13" y2="13" />
+    </g>
+</svg>

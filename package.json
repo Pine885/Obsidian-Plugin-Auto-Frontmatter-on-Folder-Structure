@@ -1,5 +1,5 @@
 {
-  "name": "obsidian-auto-tagger",
+  "name": "obsidian-auto-frontmatter",
   "version": "1.0.0",
   "description": "Automatically tags notes based on folder structure and links sibling notes.",
   "main": "main.js",

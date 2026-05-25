@@ -1,6 +1,6 @@
-# Auto Frontmatter on Folder Structure
+# Auto Frontmatter Notes by Folder Structure
 
-A powerful Obsidian plugin that transforms your folder hierarchy into a rich network of automated tags and structural links within your note frontmatter.
+Obsidian plugin that transforms your folder hierarchy into a rich network of automated tags and structural links within your note frontmatter.
 
 ## 🌟 Overview
 
@@ -42,6 +42,19 @@ Designed for large vaults and seamless workflows.
 
 ## ⚙️ Configuration Guide
 
+### Main Settings
+- **New User Guide**: A quick start guide to help you configure the plugin.
+- **Quick Run**: A button to immediately process all files in your vault.
+- **Ribbon Visibility**: Toggle which quick-access icons appear in your Obsidian ribbon:
+    - `Run Auto-Frontmatter`: Process all files.
+    - `Auto-Frontmatter Active Note`: Process only the current file.
+    - `Clear All Frontmatter`: Wipe all structural metadata from the vault.
+    - `Clear Active-Note Frontmatter`: Wipe metadata from the current file.
+- **Folder Targets**: Precisely control which notes are processed using Whitelist and Blacklist filters.
+    - **Whitelisted Folders**: Only process notes in these folders. If left empty, the plugin targets all folders in your vault.
+    - **Blacklisted Folders**: Completely ignore specific directories (e.g., `Archive`, `Templates`) to keep your metadata clean.
+- **Clear Frontmatter**: A utility to remove all automated frontmatter properties for a fresh start.
+
 ### Automation Settings
 - **Enable Automation**: Toggle real-time updates.
 - **Update Delay**: Time (ms) to wait before processing the queue. Lower = faster, Higher = lighter on CPU.
@@ -61,9 +74,6 @@ Designed for large vaults and seamless workflows.
 - **Strict Summary Name**: If enabled, only files named exactly "summary" are used.
 - **Detection Priority**: The fixed hierarchy used to find summary files.
 
-### Folder Targets
-- **Whitelisted Folders**: Only process notes in these folders. If left empty, the plugin targets all folders in your vault.
-- **Blacklisted Folders**: Completely ignore specific directories (e.g., `Archive`, `Templates`) to keep your metadata clean.
 
 ## 📖 Frontmatter Reference
 
@@ -106,7 +116,7 @@ Resources-[R]: [[Resource A], [Resource B]]
 
 ### Manual Installation
 1. Download `main.js` and `manifest.json`.
-2. Create a folder `.obsidian/plugins/obsidian-auto-tagger` in your vault.
+2. Create a folder `.obsidian/plugins/obsidian-auto-frontmatter` in your vault.
 3. Place the files inside and restart Obsidian.
 
 ### For Developers

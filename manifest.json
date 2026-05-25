@@ -1,7 +1,7 @@
 {
-  "id": "obsidian-auto-tagger",
-  "name": "Auto Frontmatter on Folder Structure",
-  "version": "3.15.0",
+  "id": "obsidian-auto-frontmatter",
+  "name": "Auto Frontmatter",
+  "version": "4.0.0",
   "minAppVersion": "1.0.0",
   "description": "Automatically tags notes and creates structural links (siblings, parents, children) based on folder hierarchy.",
   "author": "Pine885",

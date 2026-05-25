@@ -1,6 +1,6 @@
 import { Plugin, TFile, TFolder, Notice, PluginSettingTab, Setting, App } from 'obsidian';
 
-interface AutoTaggerSettings {
+interface AutoFrontmatterSettings {
     enableTagging: boolean;
     enableLinking: boolean;
     includeTargetInTags: boolean;
@@ -9,14 +9,20 @@ interface AutoTaggerSettings {
     tagDepth: number;
     linkDepth: number;
     enableAutomation: boolean;
+    forceKeySorting: boolean;
     enableSummary: boolean;
+    unlinkSummaryNotes: boolean;
     fullText: boolean;
     strictSummaryName: boolean;
     summaryPriority: string;
     queueDelay: number;
+    showRunRibbon: boolean;
+    showActiveNoteRibbon: boolean;
+    showClearAllRibbon: boolean;
+    showClearActiveRibbon: boolean;
 }
 
-const DEFAULT_SETTINGS: AutoTaggerSettings = {
+const DEFAULT_SETTINGS: AutoFrontmatterSettings = {
     enableTagging: false,
     enableLinking: false,
     includeTargetInTags: true,
@@ -25,19 +31,35 @@ const DEFAULT_SETTINGS: AutoTaggerSettings = {
     tagDepth: 99,
     linkDepth: 99,
     enableAutomation: false,
+    forceKeySorting: false,
     enableSummary: false,
+    unlinkSummaryNotes: false,
     fullText: false,
     strictSummaryName: false,
     summaryPriority: 'Exact > StartsWith > EndsWith > Contains',
-    queueDelay: 500
+    queueDelay: 500,
+    showRunRibbon: false,
+    showActiveNoteRibbon: false,
+    showClearAllRibbon: false,
+    showClearActiveRibbon: false,
 }
 
-export default class AutoTaggerPlugin extends Plugin {
-    settings!: AutoTaggerSettings;
+export default class AutoFrontmatterPlugin extends Plugin {
+    settings!: AutoFrontmatterSettings;
     private updateQueue: Set<TFile> = new Set();
     private queueTimeout: any = null;
     private folderCache: Map<string, TFolder[]> = new Map();
     private readonly structuralKeyRegex = /-\[(S|P\d+|C\d+|R|TS|TP\d+|TC\d+|TR)\]$/;
+
+    private setCustomRibbonIcon(iconEl: HTMLElement, svgKey: keyof typeof ICON_SVGS) {
+        iconEl.innerHTML = ICON_SVGS[svgKey];
+    }
+
+    private addCustomRibbonIcon(lucideIcon: string, tooltip: string, svgKey: keyof typeof ICON_SVGS, callback: () => Promise<void>) {
+        const icon = this.addRibbonIcon(lucideIcon, tooltip, callback);
+        this.setCustomRibbonIcon(icon, svgKey);
+        return icon;
+    }
 
     async onload() {
         console.log('Auto Frontmatter on Folder Structure plugin loaded');
@@ -46,10 +68,10 @@ export default class AutoTaggerPlugin extends Plugin {
         this.buildFolderCache();
 
         this.addCommand({
-            id: 'run-auto-tagger',
+            id: 'run-auto-frontmatter',
             name: 'Run Auto Frontmatter',
             callback: async () => {
-                await this.runAutoTagger();
+                await this.runAutoFrontmatter();
             }
         });
 
@@ -61,11 +83,61 @@ export default class AutoTaggerPlugin extends Plugin {
             }
         });
 
-        this.addRibbonIcon('tag', 'Run Auto Frontmatter', async () => {
-            await this.runAutoTagger();
-        });
+        if (this.settings.showRunRibbon) {
+            this.addCustomRibbonIcon('tags', 'Run Auto-Frontmatter', 'multiTagScript', async () => {
+                await this.runAutoFrontmatter();
+            });
+        }
 
-        this.addSettingTab(new AutoTaggerSettingTab(this.app, this));
+        if (this.settings.showActiveNoteRibbon) {
+            this.addCustomRibbonIcon('tag', 'Auto-Frontmatter Active Note', 'singleTagScript', async () => {
+                const file = this.app.workspace.getActiveFile();
+                if (file && file.extension === 'md') {
+                    const updated = await this.updateFileFrontmatter(file);
+                    if (updated) {
+                        new Notice(`Updated frontmatter for ${file.name}`);
+                    } else {
+                        new Notice(`No changes needed for ${file.name}`);
+                    }
+                } else {
+                    new Notice('No active markdown file found.');
+                }
+            });
+        }
+
+        if (this.settings.showClearAllRibbon) {
+            this.addCustomRibbonIcon('trash', 'Clear All Frontmatter', 'multiTagClear', async () => {
+                await this.clearAllFrontmatter();
+            });
+        }
+
+        if (this.settings.showClearActiveRibbon) {
+            this.addCustomRibbonIcon('trash-2', 'Clear Active-Note Frontmatter', 'singleTagClear', async () => {
+                await this.clearActiveNoteFrontmatter();
+            });
+        }
+
+        this.addSettingTab(new AutoFrontmatterSettingTab(this.app, this));
+
+        this.registerEvent(
+            this.app.vault.on('create', async (file) => {
+                if (file instanceof TFolder) {
+                    const name = file.name;
+                    if (!this.folderCache.has(name)) this.folderCache.set(name, []);
+                    this.folderCache.get(name)!.push(file);
+                }
+            })
+        );
+
+        this.registerEvent(
+            this.app.workspace.on('active-leaf-change', (leaf) => {
+                if (!this.settings.enableAutomation) return;
+                const file = this.app.workspace.getActiveFile();
+                if (file) {
+                    this.queueUpdate(file);
+                }
+            })
+        );
 
         this.registerEvent(
             this.app.vault.on('rename', async (file, oldPath) => {
@@ -78,14 +150,24 @@ export default class AutoTaggerPlugin extends Plugin {
                     const oldFolder = this.app.vault.getAbstractFileByPath(oldFolderPath);
                     if (oldFolder instanceof TFolder) {
                         this.queueFolder(oldFolder, false);
+                        const parentPath = oldFolderPath.substring(0, oldFolderPath.lastIndexOf('/'));
+                        const parentFolder = this.app.vault.getAbstractFileByPath(parentPath);
+                        if (parentFolder instanceof TFolder) this.queueFolder(parentFolder, false);
                     }
 
                     const newFolderPath = file.path.substring(0, file.path.lastIndexOf('/'));
                     const newFolder = this.app.vault.getAbstractFileByPath(newFolderPath);
                     if (newFolder instanceof TFolder) {
                         this.queueFolder(newFolder, false);
+                        const parentPath = newFolderPath.substring(0, newFolderPath.lastIndexOf('/'));
+                        const parentFolder = this.app.vault.getAbstractFileByPath(parentPath);
+                        if (parentFolder instanceof TFolder) this.queueFolder(parentFolder, false);
                     }
                 } else if (file instanceof TFolder) {
+                    const parentPath = file.path.substring(0, file.path.lastIndexOf('/'));
+                    const parentFolder = this.app.vault.getAbstractFileByPath(parentPath);
+                    if (parentFolder instanceof TFolder) this.queueFolder(parentFolder, false);
+
                     // Update cache: remove from old name, add to new name
                     const oldFolderName = oldPath.split('/').pop() || '';
                     const list = this.folderCache.get(oldFolderName);
@@ -112,6 +194,9 @@ export default class AutoTaggerPlugin extends Plugin {
                     const folder = this.app.vault.getAbstractFileByPath(folderPath);
                     if (folder instanceof TFolder) {
                         this.queueFolder(folder, false);
+                        const parentPath = folderPath.substring(0, folderPath.lastIndexOf('/'));
+                        const parentFolder = this.app.vault.getAbstractFileByPath(parentPath);
+                        if (parentFolder instanceof TFolder) this.queueFolder(parentFolder, false);
                     }
                 } else if (file instanceof TFolder) {
                     const list = this.folderCache.get(file.name);
@@ -124,15 +209,13 @@ export default class AutoTaggerPlugin extends Plugin {
             })
         );
 
-        this.registerEvent(
-            this.app.workspace.on('active-leaf-change', (leaf) => {
-                if (!this.settings.enableAutomation) return;
-                const file = this.app.workspace.getActiveFile();
-                if (file) {
-                    this.queueUpdate(file);
-                }
-            })
-        );
+    }
+
+    onunload() {
+        if (this.queueTimeout) {
+            clearTimeout(this.queueTimeout);
+        }
+        this.updateQueue.clear();
     }
 
     async loadSettings() {
@@ -231,7 +314,7 @@ export default class AutoTaggerPlugin extends Plugin {
     }
 
 
-    async runAutoTagger() {
+    async runAutoFrontmatter() {
         const files = this.app.vault.getMarkdownFiles();
         
         let processedCount = 0;
@@ -253,24 +336,38 @@ export default class AutoTaggerPlugin extends Plugin {
 
         const files = this.app.vault.getMarkdownFiles();
         let clearedCount = 0;
-        const yamlRegex = /^---\s*[\s\S]*?---\s*/;
-
+ 
         for (const file of files) {
             if (!this.shouldProcess(file)) continue;
             
             const cache = this.app.metadataCache.getFileCache(file);
             if (!cache?.frontmatter) continue;
-
-            await this.app.vault.process(file, (content) => {
-                if (yamlRegex.test(content)) {
-                    clearedCount++;
-                    return content.replace(yamlRegex, '').trimStart();
-                }
-                return content;
+ 
+            await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+                Object.keys(frontmatter).forEach(key => delete frontmatter[key]);
+                clearedCount++;
             });
         }
 
         new Notice(`Cleared frontmatter from ${clearedCount} files.`);
+    }
+
+    async clearActiveNoteFrontmatter() {
+        const file = this.app.workspace.getActiveFile();
+        if (!file || file.extension !== 'md') {
+            new Notice('No active markdown file found.');
+            return;
+        }
+
+        if (!confirm(`⚠️ WARNING: This will remove ALL frontmatter properties from ${file.name}. This action cannot be undone. Are you sure?`)) {
+            return;
+        }
+
+        await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+            Object.keys(frontmatter).forEach(key => delete frontmatter[key]);
+        });
+
+        new Notice(`Cleared frontmatter from ${file.name}.`);
     }
 
     extractTagsFromPath(file: TFile): string[] {
@@ -282,8 +379,8 @@ export default class AutoTaggerPlugin extends Plugin {
         }
 
         let tags = pathParts.map(part => {
-            const sanitized = part.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
-            return `#${sanitized}`;
+            const sanitized = part.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_').replace(/_+/g, '_');
+            return sanitized;
         });
         
         if (this.settings.tagDepth === 0) {
@@ -300,16 +397,26 @@ export default class AutoTaggerPlugin extends Plugin {
     findSiblingNodes(file: TFile): string[] {
         const folderPath = file.path.substring(0, file.path.lastIndexOf('/'));
         if (!folderPath) {
-            const allFiles = this.app.vault.getMarkdownFiles();
-            return allFiles
-                .filter(f => f !== file && f.path.indexOf('/') === -1 && this.shouldProcess(f))
-                .map(f => `[[${f.basename}]]`);
+            const root = this.app.vault.getRoot();
+            const summaryFile = this.getSummaryFile(root as TFolder);
+            return root?.children
+                .filter(f => {
+                    if (!(f instanceof TFile && f !== file && f.extension === 'md' && this.shouldProcess(f as TFile))) return false;
+                    if (this.settings.unlinkSummaryNotes && f === summaryFile) return false;
+                    return true;
+                })
+                .map(f => `[[${(f as TFile).basename}]]`) || [];
         }
 
         const folder = this.app.vault.getAbstractFileByPath(folderPath);
         if (folder instanceof TFolder) {
+            const summaryFile = this.getSummaryFile(folder);
             return folder.children
-                .filter(child => child instanceof TFile && child !== file && child.extension === 'md' && this.shouldProcess(child))
+                .filter(child => {
+                    if (!(child instanceof TFile && child !== file && child.extension === 'md' && this.shouldProcess(child))) return false;
+                    if (this.settings.unlinkSummaryNotes && child === summaryFile) return false;
+                    return true;
+                })
                 .map(child => `[[${(child as TFile).basename}]]`);
         }
 
@@ -326,20 +433,33 @@ export default class AutoTaggerPlugin extends Plugin {
         
         for (let d = 1; d <= depth; d++) {
             if (!currentPath) {
-                const rootFiles = this.app.vault.getMarkdownFiles().filter(f => f.path.indexOf('/') === -1 && this.shouldProcess(f));
+                const root = this.app.vault.getRoot();
+                const summaryFile = this.getSummaryFile(root as TFolder);
+                const rootFiles = root?.children
+                    .filter(f => {
+                        if (!(f instanceof TFile && f.extension === 'md' && this.shouldProcess(f as TFile))) return false;
+                        if (this.settings.unlinkSummaryNotes && f === summaryFile) return false;
+                        return true;
+                    })
+                    .map(f => `[[${(f as TFile).basename}]]`) || [];
                 if (rootFiles.length > 0) {
-                    results.push({ folderName: 'Root', level: d, notes: rootFiles.map(f => `[[${f.basename}]]`) });
+                    results.push({ folderName: 'Root', level: d, notes: rootFiles });
                 }
                 break;
             }
             
             const folder = this.app.vault.getAbstractFileByPath(currentPath);
             if (folder instanceof TFolder) {
+                const summaryFile = this.getSummaryFile(folder);
                 const notes = folder.children
-                    .filter(child => child instanceof TFile && child.extension === 'md' && this.shouldProcess(child))
+                    .filter(child => {
+                        if (!(child instanceof TFile && child.extension === 'md' && this.shouldProcess(child))) return false;
+                        if (this.settings.unlinkSummaryNotes && child === summaryFile) return false;
+                        return true;
+                    })
                     .map(child => `[[${(child as TFile).basename}]]`);
                 
-                if (notes.length > 0) {
+                if (notes.length > 0 || this.getSummaryFile(folder) !== null) {
                     results.push({ folderName: folder.name, level: d, notes });
                 }
                 
@@ -362,11 +482,16 @@ export default class AutoTaggerPlugin extends Plugin {
 
             folder.children.forEach(child => {
                 if (child instanceof TFolder) {
+                    const summaryFile = this.getSummaryFile(child);
                     const notes = child.children
-                        .filter(gc => gc instanceof TFile && gc.extension === 'md' && this.shouldProcess(gc))
+                        .filter(gc => {
+                            if (!(gc instanceof TFile && gc.extension === 'md' && this.shouldProcess(gc))) return false;
+                            if (this.settings.unlinkSummaryNotes && gc === summaryFile) return false;
+                            return true;
+                        })
                         .map(gc => `[[${(gc as TFile).basename}]]`);
                     
-                    if (notes.length > 0) {
+                    if (notes.length > 0 || this.getSummaryFile(child) !== null) {
                         results.push({ folderName: child.name, level: currentDepth, notes });
                     }
                     traverse(child, currentDepth + 1);
@@ -384,8 +509,13 @@ export default class AutoTaggerPlugin extends Plugin {
 
         const results: string[] = [];
         for (const folder of folders) {
+            const summaryFile = this.getSummaryFile(folder);
             const notes = folder.children
-                .filter(c => c instanceof TFile && c.extension === 'md' && this.shouldProcess(c as TFile))
+                .filter(c => {
+                    if (!(c instanceof TFile && c.extension === 'md' && this.shouldProcess(c as TFile))) return false;
+                    if (this.settings.unlinkSummaryNotes && c === summaryFile) return false;
+                    return true;
+                })
                 .map(c => `[[${(c as TFile).basename}]]`);
             results.push(...notes);
         }
@@ -400,6 +530,36 @@ export default class AutoTaggerPlugin extends Plugin {
     private findFolderByName(name: string): TFolder | null {
         const folders = this.folderCache.get(name);
         return folders && folders.length > 0 ? folders[0] : null;
+    }
+
+    private getSummaryFile(folder: TFolder): TFile | null {
+        const keyword = 'summary';
+        const files = folder.children.filter(child => child instanceof TFile && child.extension === 'md') as TFile[];
+        if (files.length === 0) return null;
+
+        if (this.settings.strictSummaryName) {
+            return files.find(f => f.basename.toLowerCase() === keyword) || null;
+        }
+
+        const priorityMap: Record<string, (name: string, keyword: string) => boolean> = {
+            'Exact': (name, keyword) => name === keyword,
+            'StartsWith': (name, keyword) => name.startsWith(keyword),
+            'EndsWith': (name, keyword) => name.endsWith(keyword),
+            'Contains': (name, keyword) => name.includes(keyword),
+        };
+
+        const priorities = this.settings.summaryPriority
+            .split('>')
+            .map(p => p.trim())
+            .filter(p => priorityMap[p]);
+
+        for (const priority of priorities) {
+            const searchFn = priorityMap[priority];
+            const found = files.find(f => searchFn(f.basename.toLowerCase(), keyword));
+            if (found) return found;
+        }
+
+        return null;
     }
 
     private async getFolderSummary(folder: TFolder): Promise<{ text: string, file: TFile } | null> {
@@ -569,7 +729,9 @@ export default class AutoTaggerPlugin extends Plugin {
                     if (this.settings.enableSummary && parentSummaries.has(p.folderName)) {
                         structuralData.push({ key: `${p.folderName}-[TP${p.level}]`, value: parentSummaries.get(p.folderName) });
                     }
-                    structuralData.push({ key: `${p.folderName}-[P${p.level}]`, value: p.notes });
+                    if (p.notes.length > 0) {
+                        structuralData.push({ key: `${p.folderName}-[P${p.level}]`, value: p.notes });
+                    }
                 });
             }
             if (this.settings.linkDepth >= 1) {
@@ -587,7 +749,9 @@ export default class AutoTaggerPlugin extends Plugin {
                     if (this.settings.enableSummary && childSummaries.has(c.folderName)) {
                         structuralData.push({ key: `${c.folderName}-[TC${c.level}]`, value: childSummaries.get(c.folderName) });
                     }
-                    structuralData.push({ key: `${c.folderName}-[C${c.level}]`, value: c.notes });
+                    if (c.notes.length > 0) {
+                        structuralData.push({ key: `${c.folderName}-[C${c.level}]`, value: c.notes });
+                    }
                 });
             }
             const cousinKeys = Object.keys(currentFrontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
@@ -619,8 +783,35 @@ export default class AutoTaggerPlugin extends Plugin {
             }
         });
 
-        if (JSON.stringify(currentFrontmatter) === JSON.stringify(preFlightTargetMap)) {
-            return false;
+        const areEqual = (obj1: any, obj2: any): boolean => {
+            const keys1 = Object.keys(obj1);
+            const keys2 = Object.keys(obj2);
+            if (keys1.length !== keys2.length) return false;
+            for (const key of keys1) {
+                const val1 = obj1[key];
+                const val2 = obj2[key];
+                if (Array.isArray(val1) && Array.isArray(val2)) {
+                    if (val1.length !== val2.length) return false;
+                    if (!val1.every((v, i) => v === val2[i])) return false;
+                } else if (val1 !== val2) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        if (areEqual(currentFrontmatter, preFlightTargetMap)) {
+            if (this.settings.forceKeySorting) {
+                const keys1 = Object.keys(currentFrontmatter);
+                const keys2 = Object.keys(preFlightTargetMap);
+                if (keys1.some((key, i) => key !== keys2[i])) {
+                    // Keys are in different order, force write
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
         }
 
         await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
@@ -639,7 +830,7 @@ export default class AutoTaggerPlugin extends Plugin {
                         if (match) {
                             const folderName = match[1];
                             const sanitized = folderName.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
-                            const folderTag = `#${sanitized}`;
+                            const folderTag = sanitized;
                             if (!tags.includes(folderTag)) tags.push(folderTag);
                         }
                     }
@@ -663,7 +854,9 @@ export default class AutoTaggerPlugin extends Plugin {
                         if (this.settings.enableSummary && parentSummaries.has(p.folderName)) {
                             structuralData.push({ key: `${p.folderName}-[TP${p.level}]`, value: parentSummaries.get(p.folderName) });
                         }
-                        structuralData.push({ key: `${p.folderName}-[P${p.level}]`, value: p.notes });
+                        if (p.notes.length > 0) {
+                            structuralData.push({ key: `${p.folderName}-[P${p.level}]`, value: p.notes });
+                        }
                     });
                 }
                 if (this.settings.linkDepth >= 1) {
@@ -681,7 +874,9 @@ export default class AutoTaggerPlugin extends Plugin {
                         if (this.settings.enableSummary && childSummaries.has(c.folderName)) {
                             structuralData.push({ key: `${c.folderName}-[TC${c.level}]`, value: childSummaries.get(c.folderName) });
                         }
-                        structuralData.push({ key: `${c.folderName}-[C${c.level}]`, value: c.notes });
+                        if (c.notes.length > 0) {
+                            structuralData.push({ key: `${c.folderName}-[C${c.level}]`, value: c.notes });
+                        }
                     });
                 }
                 const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
@@ -723,17 +918,17 @@ export default class AutoTaggerPlugin extends Plugin {
             });
 
             // 5. Dirty check
-            isDirty = JSON.stringify(backup) !== JSON.stringify(frontmatter);
+            isDirty = !areEqual(backup, frontmatter);
             updated = isDirty;
         });
         return updated;
     }
 }
 
-class AutoTaggerSettingTab extends PluginSettingTab {
-    plugin: AutoTaggerPlugin;
+class AutoFrontmatterSettingTab extends PluginSettingTab {
+    plugin: AutoFrontmatterPlugin;
 
-    constructor(app: App, plugin: AutoTaggerPlugin) {
+    constructor(app: App, plugin: AutoFrontmatterPlugin) {
         super(app, plugin);
         this.plugin = plugin;
     }
@@ -742,18 +937,23 @@ class AutoTaggerSettingTab extends PluginSettingTab {
         const { containerEl } = this;
         containerEl.empty();
 
-        const resetContainer = containerEl.createDiv({ cls: 'reset-settings-container' });
-        resetContainer.style.display = 'flex';
-        resetContainer.style.justifyContent = 'flex-end';
-        resetContainer.style.marginBottom = '20px';
+        // Header with Reset Button
+        const header = containerEl.createDiv({ cls: 'settings-header' });
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+        header.style.marginBottom = '3px';
 
-        const resetBtn = resetContainer.createEl('button', { 
-            text: 'Reset Settings',
-            cls: 'mod-cta' 
-        ,});
+        const title = header.createEl('h2', { text: 'Auto FrontMatter' });
+        title.style.fontSize = '24px';
+        title.style.fontWeight = 'bold';
+
+        const resetBtn = header.createEl('button', {
+            text: 'Reset Settings'
+        });
         
         resetBtn.onclick = async () => {
-            if (confirm('Are you sure you want to reset all Auto Frontmatter on Folder Structure settings to default?')) {
+            if (confirm('Are you sure you want to reset all settings to default?')) {
                 this.plugin.settings = Object.assign({}, DEFAULT_SETTINGS);
                 await this.plugin.saveSettings();
                 this.display();
@@ -761,9 +961,178 @@ class AutoTaggerSettingTab extends PluginSettingTab {
             }
         };
 
-        containerEl.createEl('h2', { text: 'Automation Settings' });
+        // Tab Navigation
+        const tabContainer = containerEl.createDiv({ cls: 'settings-tabs' });
+        tabContainer.style.display = 'flex';
+        tabContainer.style.gap = '2px';
+        tabContainer.style.marginBottom = '0';
+        tabContainer.style.borderBottom = '2px solid var(--background-modifier-border)';
+        tabContainer.style.paddingBottom = '0';
+        tabContainer.style.paddingLeft = '4px';
 
-        new Setting(containerEl)
+        const tabs = [
+            { id: 'main', label: 'Main' },
+            { id: 'automation', label: 'Automation' },
+            { id: 'tag', label: 'Tag' },
+            { id: 'link', label: 'Link' },
+            { id: 'summary', label: 'Summary' }
+        ];
+
+        const contentContainer = containerEl.createDiv({ cls: 'settings-content' });
+        contentContainer.style.borderTop = 'none';
+        contentContainer.style.paddingTop = '15px';
+        const tabPanes: Record<string, HTMLElement> = {};
+
+        tabs.forEach(tab => {
+            const btn = tabContainer.createEl('button', {
+                text: tab.label,
+                cls: 'tab-button'
+            });
+            btn.style.cursor = 'pointer';
+            btn.style.padding = '8px 16px';
+            btn.style.border = '1px solid var(--background-modifier-border)';
+            btn.style.borderBottom = 'none';
+            btn.style.borderRadius = '8px 8px 0 0';
+            btn.style.backgroundColor = 'var(--background-secondary)';
+            btn.style.color = 'var(--text-muted)';
+            btn.style.fontSize = '12px';
+            btn.style.marginBottom = '-2px';
+            btn.style.transition = 'all 0.1s ease';
+            
+            const pane = contentContainer.createDiv({ cls: 'tab-pane' });
+            pane.style.display = 'none';
+            tabPanes[tab.id] = pane;
+            
+            btn.onclick = () => {
+                Object.values(tabPanes).forEach(p => p.style.display = 'none');
+                pane.style.display = 'block';
+                
+                // Update active button style
+                Array.from(tabContainer.children).forEach(child => {
+                    if (child instanceof HTMLElement) {
+                        child.style.fontWeight = 'normal';
+                        child.style.backgroundColor = 'var(--background-secondary)';
+                        child.style.color = 'var(--text-muted)';
+                        child.style.borderBottom = 'none';
+                    }
+                });
+                btn.style.fontWeight = 'bold';
+                btn.style.backgroundColor = 'var(--background-primary)';
+                btn.style.color = 'var(--text-normal)';
+                btn.style.borderBottom = '2px solid var(--background-primary)';
+                btn.style.zIndex = '1';
+            };
+        });
+
+        // Default active tab
+        const firstTabBtn = tabContainer.children[0] as HTMLElement;
+        if (firstTabBtn) firstTabBtn.click();
+
+        // --- Main Tab ---
+        const mainPane = tabPanes['main'];
+        mainPane.createEl('h3', { text: 'Main Settings' });
+
+        new Setting(mainPane)
+            .setName('New User Guide')
+            .setDesc('The plugin is disabled by default. Please browse through the settings to enable the features you want.')
+            .addButton(btn => {
+                btn.buttonEl.innerText = 'Run Auto-Frontmatter';
+                btn.buttonEl.classList.add('mod-cta');
+                btn.onClick(async () => {
+                    await this.plugin.runAutoFrontmatter();
+                });
+            });
+
+        mainPane.createEl('h3', { text: 'Folder Targets' });
+        new Setting(mainPane)
+            .setName('Whitelisted Folders')
+            .setDesc('Only process files in these folders (comma-separated).')
+            .addText(text => text
+                .setValue(this.plugin.settings.whitelistedFolders)
+                .onChange(async (value) => {
+                    this.plugin.settings.whitelistedFolders = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(mainPane)
+            .setName('Blacklisted Folders')
+            .setDesc('Ignore files in these folders (comma-separated).')
+            .addText(text => text
+                .setValue(this.plugin.settings.blacklistedFolders)
+                .onChange(async (value) => {
+                    this.plugin.settings.blacklistedFolders = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        mainPane.createEl('h3', { text: 'Ribbon Settings' });
+        new Setting(mainPane)
+            .setName('Show Ribbons')
+            .setDesc('Toggle which ribbon icons are visible for quick access to plugin features. Must reload the plugin after changing for ribbons to update.');
+
+        new Setting(mainPane)
+            .setName('Run Auto-Frontmatter ribbon')
+            .setDesc('Show the ribbon icon to run the plugin on all files.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showRunRibbon)
+                .onChange(async (value) => {
+                    this.plugin.settings.showRunRibbon = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(mainPane)
+            .setName('Auto-Frontmatter active note ribbon')
+            .setDesc('Show the ribbon icon to update the active note.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showActiveNoteRibbon)
+                .onChange(async (value) => {
+                    this.plugin.settings.showActiveNoteRibbon = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        mainPane.createEl('h3', { text: '⚠️ Clear Frontmatter' });
+
+        new Setting(mainPane)
+            .setName('Clear All Frontmatter')
+            .setDesc('Remove all frontmatter properties from all notes in your vault.')
+            .addButton(btn => {
+                btn.buttonEl.innerText = 'Clear All';
+                btn.buttonEl.classList.add('mod-warning');
+                btn.onClick(async () => {
+                    await this.plugin.clearAllFrontmatter();
+                });
+            });
+
+        new Setting(mainPane)
+            .setName('Clear All Frontmatter ribbon')
+            .setDesc('Show the ribbon icon to clear all frontmatter in the vault.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showClearAllRibbon)
+                .onChange(async (value) => {
+                    this.plugin.settings.showClearAllRibbon = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(mainPane)
+            .setName('Clear Active-Note Frontmatter ribbon')
+            .setDesc('Show the ribbon icon to clear frontmatter for the active note.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showClearActiveRibbon)
+                .onChange(async (value) => {
+                    this.plugin.settings.showClearActiveRibbon = value;
+                    await this.plugin.saveSettings();
+                }));
+
+
+
+        // --- Automation Tab ---
+        const autoPane = tabPanes['automation'];
+        autoPane.createEl('h3', { text: 'Automation Settings' });
+
+        new Setting(autoPane)
+            .setName('⚠️ Automation Warning')
+            .setDesc('Enabling automation on very large vaults or with cloud sync (iCloud/Dropbox) may cause frequent file writes and potential sync loops.');
+            
+        new Setting(autoPane)
             .setName('Enable Automation')
             .setDesc('Automatically update tags and links when files are moved, renamed, deleted, or opened.')
             .addToggle(toggle => toggle
@@ -773,9 +1142,19 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
+        new Setting(autoPane)
+            .setName('Force Key Sorting')
+            .setDesc('Force frontmatter keys to be sorted even if values are identical. Heavy CPU usage on large vaults. Use with caution.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.forceKeySorting)
+                .onChange(async (value) => {
+                    this.plugin.settings.forceKeySorting = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(autoPane)
             .setName('Update Delay')
-            .setDesc('Time to wait (in milliseconds) before processing the update queue. Lower values are more responsive but may increase CPU usage.')
+            .setDesc('Time to wait (in milliseconds) before processing the update queue.')
             .addText(text => text
                 .setValue(this.plugin.settings.queueDelay.toString())
                 .onChange(async (value) => {
@@ -783,14 +1162,12 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
-            .setName('⚠️ Automation Warning')
-            .setDesc('Enabling automation on very large vaults or with cloud sync (iCloud/Dropbox) may cause frequent file writes and potential sync loops.');
 
+        // --- Tag Tab ---
+        const tagPane = tabPanes['tag'];
+        tagPane.createEl('h3', { text: 'Auto Tagging' });
 
-        containerEl.createEl('h2', { text: 'Auto Tag Settings' });
-
-        new Setting(containerEl)
+        new Setting(tagPane)
             .setName('Enable Tagging')
             .setDesc('Automatically add tags based on folder structure.')
             .addToggle(toggle => toggle
@@ -800,9 +1177,9 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
+        new Setting(tagPane)
             .setName('Tag Depth')
-            .setDesc('Tagging level: 0 = Clear tags, 1 = Immediate parent only, 2+ = Hierarchy (up to N levels).')
+            .setDesc('Tagging level: 0 = Clear tags, 1 = Immediate parent only, 2+ = Hierarchy.')
             .addText(text => text
                 .setValue(this.plugin.settings.tagDepth.toString())
                 .onChange(async (value) => {
@@ -810,11 +1187,13 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        containerEl.createEl('h2', { text: 'Auto Link Settings' });
+        // --- Link Tab ---
+        const linkPane = tabPanes['link'];
+        linkPane.createEl('h3', { text: 'Auto Linking' });
 
-        new Setting(containerEl)
+        new Setting(linkPane)
             .setName('Enable Linking')
-            .setDesc('Automatically link sibling, parent, child, and cousin notes. If disabled, structural links are removed, but Cousin keys are preserved (with empty values).')
+            .setDesc('Automatically link sibling, parent, child, and cousin notes.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.enableLinking)
                 .onChange(async (value) => {
@@ -822,9 +1201,9 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
+        new Setting(linkPane)
             .setName('Link Depth')
-            .setDesc('Linking level: 0 = Cousins only, 1 = Siblings + Cousins, 2+ = Hierarchy + Siblings + Cousins (Depth = Value - 1).')
+            .setDesc('Linking level: 0 = Cousins only, 1 = Siblings + Cousins, 2+ = Hierarchy.')
             .addText(text => text
                 .setValue(this.plugin.settings.linkDepth.toString())
                 .onChange(async (value) => {
@@ -832,13 +1211,15 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-                new Setting(containerEl)
-                    .setName('Cousin Links')
-                    .setDesc('💡 Tip: You can create "Cousin Links" by adding a key like "FolderName-[R]:" to your note\'s frontmatter. The plugin will automatically link all notes in any folder with that name across your vault.');
+        new Setting(linkPane)
+            .setName('💡 Cousin Links')
+            .setDesc('Create "Cousin Links" by adding a key like "FolderName-[R]:" to your note\'s frontmatter.');
 
-        containerEl.createEl('h2', { text: 'Summary Settings' });
+        // --- Summary Tab ---
+        const sumPane = tabPanes['summary'];
+        sumPane.createEl('h3', { text: 'Auto Summary' });
 
-        new Setting(containerEl)
+        new Setting(sumPane)
             .setName('Enable Summary')
             .setDesc('Automatically add folder summaries to frontmatter if a summary file is found.')
             .addToggle(toggle => toggle
@@ -848,7 +1229,17 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
+        new Setting(sumPane)
+            .setName('Unlink Summary notes')
+            .setDesc('Exclude summary notes from being listed as structural links (siblings, parents, children).')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.unlinkSummaryNotes)
+                .onChange(async (value) => {
+                    this.plugin.settings.unlinkSummaryNotes = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(sumPane)
             .setName('Full Text')
             .setDesc('If disabled, only the first paragraph of the summary file will be used.')
             .addToggle(toggle => toggle
@@ -858,7 +1249,7 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
+        new Setting(sumPane)
             .setName('Strict Summary Name')
             .setDesc('If enabled, only files named exactly the summary keyword will be used.')
             .addToggle(toggle => toggle
@@ -868,55 +1259,16 @@ class AutoTaggerSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(containerEl)
+        new Setting(sumPane)
             .setName('Summary Detection Priority')
             .setDesc(`Current hierarchy: ${this.plugin.settings.summaryPriority}`);
 
-
-        containerEl.createEl('h2', { text: 'Folder Targets' });
-
-        new Setting(containerEl)
-            .setName('Whitelisted Folders')
-            .setDesc('Only process files in these folders (comma-separated). If empty, all folders are targeted.')
-            .addText(text => text
-                .setValue(this.plugin.settings.whitelistedFolders)
-                .onChange(async (value) => {
-                    this.plugin.settings.whitelistedFolders = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Blacklisted Folders')
-            .setDesc('Ignore files in these folders (comma-separated). e.g., "Archive" or "Templates/Old".')
-            .addText(text => text
-                .setValue(this.plugin.settings.blacklistedFolders)
-                .onChange(async (value) => {
-                    this.plugin.settings.blacklistedFolders = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        containerEl.createEl('h2', { text: 'Danger Zone' });
-        containerEl.createEl('p', {
-            text: 'The following actions are destructive and cannot be undone.',
-            attr: { style: 'color: var(--text-error); font-weight: bold;' }
-        });
-
-        const clearAllContainer = containerEl.createDiv({ cls: 'clear-all-container' });
-        clearAllContainer.style.display = 'flex';
-        clearAllContainer.style.justifyContent = 'flex-end';
-        clearAllContainer.style.marginTop = '40px';
-        clearAllContainer.style.borderTop = '1px solid var(--background-modifier-border)';
-        clearAllContainer.style.paddingTop = '20px';
-
-        const clearAllBtn = clearAllContainer.createEl('button', { 
-            text: 'Clear All Frontmatter',
-            cls: 'mod-cta' 
-        });
-        clearAllBtn.style.backgroundColor = 'var(--text-error)';
-        clearAllBtn.style.color = 'var(--text-normal)';
-
-        clearAllBtn.onclick = async () => {
-            await this.plugin.clearAllFrontmatter();
-        };
     }
 }
+
+const ICON_SVGS = {
+    multiTagClear: '<svg viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" fill="none" width="18" height="18" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">    <g stroke-width="1.5" />    <g />    <g>        <g>            <g>                <path d="M14.1748 1.958l0 3.2168c0 0.8883 0.7201 1.6084 1.6084 1.6084l3.2168 0" />                <path d="M6.1329 19.042l11.2587 0c0.8883 0 1.6084-0.7201 1.6084-1.6084V5.979l-4.021-4.021-7.2377 0c-0.8883 0-1.6084 0.7201-1.6084 1.6084l0 2.4126" />                <path d="M9.1329 22.042l11.2587 0c0.8883 0 1.6084-0.7201 1.6084-1.6084V9.979" />            </g>            <g stroke-width="1.5" />        </g>        <line x1="2.5" x2="10.5" y1="13" y2="13" />    </g></svg>',
+    multiTagScript: '<svg viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" fill="none" width="18" height="18" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">    <g>        <g>            <path d="M14.1748 1.958l0 3.2168c0 0.8883 0.7201 1.6084 1.6084 1.6084l3.2168 0" />            <path d="M6.1329 19.042l11.2587 0c0.8883 0 1.6084-0.7201 1.6084-1.6084V5.979l-4.021-4.021-7.2377 0c-0.8883 0-1.6084 0.7201-1.6084 1.6084l0 2.4126" />            <path d="M9.1329 22.042l11.2587 0c0.8883 0 1.6084-0.7201 1.6084-1.6084V9.979" />        </g>        <g stroke-width="1.5" />    </g>    <g stroke-width="1.5">        <path d="M5.0714 15.467l-1 0a2.5 2.5 0 0 1 0-5l1 0" />        <path d="M8.0714 10.467l1 0a2.5 2.5 0 1 1 0 5l-1 0" />        <line x1="4.571429" x2="8.571429" y1="12.967033" y2="12.967033" />    </g></svg>',
+    singleTagClear: '<svg viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" fill="none" width="18" height="18" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">    <line x1="2" x2="10" y1="15" y2="15" />    <g>        <path d="M6 22h14c1.1046 0 2-0.8954 2-2V7l-5-5H8C6.8954 2 6 2.8954 6 4v2" />        <path d="M16 2v4a2 2 0 0 0 2 2h4" />    </g></svg>',
+    singleTagScript: '<svg viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" fill="none" width="18" height="18" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">    <g>        <path d="M6 22h14c1.1046 0 2-0.8954 2-2V7l-5-5H8C6.8954 2 6 2.8954 6 4v2" />        <path d="M16 2v4a2 2 0 0 0 2 2h4" />    </g>    <g stroke-width="1.5">        <path d="M5.0714 16.467l-1 0a2.5 2.5 0 0 1 0-5l1 0" />        <path d="M8.0714 11.467l1 0a2.5 2.5 0 1 1 0 5l-1 0" />        <line x1="4.571429" x2="8.571429" y1="13.967033" y2="13.967033" />    </g></svg>',
+};
