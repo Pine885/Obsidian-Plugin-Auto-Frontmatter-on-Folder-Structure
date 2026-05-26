@@ -3,7 +3,6 @@ import { Plugin, TFile, TFolder, Notice, PluginSettingTab, Setting, App } from '
 interface AutoFrontmatterSettings {
     enableTagging: boolean;
     enableLinking: boolean;
-    includeTargetInTags: boolean;
     whitelistedFolders: string;
     blacklistedFolders: string;
     tagDepth: number;
@@ -25,7 +24,6 @@ interface AutoFrontmatterSettings {
 const DEFAULT_SETTINGS: AutoFrontmatterSettings = {
     enableTagging: false,
     enableLinking: false,
-    includeTargetInTags: true,
     whitelistedFolders: '',
     blacklistedFolders: '',
     tagDepth: 99,
@@ -283,10 +281,12 @@ export default class AutoFrontmatterPlugin extends Plugin {
 
         const traverse = (folder: TFolder) => {
             const name = folder.name;
-            if (!this.folderCache.has(name)) {
-                this.folderCache.set(name, []);
+            if (name) {
+                if (!this.folderCache.has(name)) {
+                    this.folderCache.set(name, []);
+                }
+                this.folderCache.get(name)!.push(folder);
             }
-            this.folderCache.get(name)!.push(folder);
 
             folder.children.forEach(child => {
                 if (child instanceof TFolder) traverse(child);
@@ -345,8 +345,8 @@ export default class AutoFrontmatterPlugin extends Plugin {
  
             await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
                 Object.keys(frontmatter).forEach(key => delete frontmatter[key]);
-                clearedCount++;
             });
+            clearedCount++;
         }
 
         new Notice(`Cleared frontmatter from ${clearedCount} files.`);
@@ -381,7 +381,7 @@ export default class AutoFrontmatterPlugin extends Plugin {
         let tags = pathParts.map(part => {
             const sanitized = part.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_').replace(/_+/g, '_');
             return sanitized;
-        });
+        }).filter(tag => tag.replace(/_/g, '').length > 0);
         
         if (this.settings.tagDepth === 0) {
             return []; // Signal to clear tags
@@ -602,9 +602,22 @@ export default class AutoFrontmatterPlugin extends Plugin {
             return null;
         }
         
-        // Strip YAML frontmatter
-        const yamlRegex = /^---\s*[\s\S]*?---\s*/;
-        let text = content.replace(yamlRegex, '').trim();
+        // Strip YAML frontmatter using Obsidian's metadata cache for accurate boundaries.
+        // The cache uses a real YAML parser that correctly handles --- inside |- block scalars,
+        // unlike a simple regex which would stop at the first --- it encounters.
+        let text: string;
+        const fileCache = this.app.metadataCache.getFileCache(bestFile);
+        if (fileCache?.frontmatterPosition) {
+            const endOffset = fileCache.frontmatterPosition.end.offset;
+            text = content.substring(endOffset);
+            // Strip the closing --- delimiter and any leading whitespace
+            text = text.replace(/^---[ \t]*\r?\n?/, '').trim();
+        } else {
+            // Fallback: regex-based stripping (may be inaccurate if frontmatter
+            // contains --- inside block scalar values, but better than nothing)
+            const yamlRegex = /^---\s*[\s\S]*?---\s*/;
+            text = content.replace(yamlRegex, '').trim();
+        }
 
         // Handle first paragraph logic (skip headers)
         if (!this.settings.fullText) {
@@ -618,6 +631,7 @@ export default class AutoFrontmatterPlugin extends Plugin {
             .replace(/\[\[([^\]]+)\]\]/g, (match, p1) => p1.includes('|') ? p1.split('|')[1] : p1)
             .replace(/[\*_~`]/g, '')       // Remove bold, italic, strikethrough, inline code
             .replace(/^#+\s+/gm, '')       // Remove headers from the start of lines
+            .replace(/^---+\s*$/gm, '')    // Remove horizontal rules (---) that could corrupt YAML when injected as values
             .trim();
 
         return { text, file: bestFile };
@@ -702,16 +716,13 @@ export default class AutoFrontmatterPlugin extends Plugin {
         
         if (this.settings.enableTagging) {
             let tags = this.extractTagsFromPath(file);
-            if (this.settings.includeTargetInTags) {
-                const cousinKeys = Object.keys(currentFrontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
-                for (const key of cousinKeys) {
-                    const match = key.match(/^(.+)-\[R\]$/);
-                    if (match) {
-                        const folderName = match[1];
-                        const sanitized = folderName.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
-                        const folderTag = `#${sanitized}`;
-                        if (!tags.includes(folderTag)) tags.push(folderTag);
-                    }
+            const cousinKeys = Object.keys(currentFrontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+            for (const key of cousinKeys) {
+                const match = key.match(/^(.+)-\[R\]$/);
+                if (match) {
+                    const folderName = match[1];
+                    const sanitized = folderName.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
+                    if (!tags.includes(sanitized)) tags.push(sanitized);
                 }
             }
             if (tags.length > 0) {
@@ -823,16 +834,13 @@ export default class AutoFrontmatterPlugin extends Plugin {
             let tags: string[] = [];
             if (this.settings.enableTagging) {
                 tags = this.extractTagsFromPath(file);
-                if (this.settings.includeTargetInTags) {
-                    const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
-                    for (const key of cousinKeys) {
-                        const match = key.match(/^(.+)-\[R\]$/);
-                        if (match) {
-                            const folderName = match[1];
-                            const sanitized = folderName.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
-                            const folderTag = sanitized;
-                            if (!tags.includes(folderTag)) tags.push(folderTag);
-                        }
+                const cousinKeys = Object.keys(frontmatter).filter(key => /^(.+)-\[R\]$/.test(key));
+                for (const key of cousinKeys) {
+                    const match = key.match(/^(.+)-\[R\]$/);
+                    if (match) {
+                        const folderName = match[1];
+                        const sanitized = folderName.replace(/[\s/\\\[\](){}'"< >|:#*?]/g, '_');
+                        if (!tags.includes(sanitized)) tags.push(sanitized);
                     }
                 }
             }
@@ -918,7 +926,7 @@ export default class AutoFrontmatterPlugin extends Plugin {
             });
 
             // 5. Dirty check
-            isDirty = !areEqual(backup, frontmatter);
+            isDirty = !areEqual(backup, frontmatter) || this.settings.forceKeySorting;
             updated = isDirty;
         });
         return updated;
@@ -1218,6 +1226,10 @@ class AutoFrontmatterSettingTab extends PluginSettingTab {
         // --- Summary Tab ---
         const sumPane = tabPanes['summary'];
         sumPane.createEl('h3', { text: 'Auto Summary' });
+
+        new Setting(sumPane)
+            .setName('⚠️ Unstable Feature')
+            .setDesc(`This feature is in early testing and may produce unexpected results. It attempts to read summary content from folder-level notes and inject it into text frontmatter. Use with caution and always back up your vault before enabling.`);
 
         new Setting(sumPane)
             .setName('Enable Summary')
